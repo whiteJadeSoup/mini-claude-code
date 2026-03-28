@@ -118,6 +118,20 @@ def _extract_summary(content: str) -> str:
     return m.group(1).strip() if m else content
 
 
+def _auto_compact(history: list, prefix: str = "") -> bool:
+    """Compact if context usage exceeds 80%. Returns True if compaction occurred."""
+    if usage._tracker.context_tokens_used() <= usage._tracker.context_limit * 0.8:
+        return False
+    print(f"\n{prefix}[Context at 80%, compacting...]", flush=True)
+    try:
+        n = compact(history)
+        print(f"{prefix}[Compacted: {n} messages removed]")
+        return True
+    except Exception as e:
+        print(f"{prefix}[Auto-compact failed: {e}]")
+        return False
+
+
 def compact(history: list, custom_instructions: str = "") -> int:
     """Layer 2: summarize conversation via sub-agent and rebuild history.
 
@@ -151,14 +165,8 @@ def compact(history: list, custom_instructions: str = "") -> int:
 def _run_loop(bound_llm, history, tools_by_name, prefix="", source="agent"):
     while True:
         _clear_old_tool_results(history)
-        if usage._tracker.context_tokens_used() > usage._tracker.context_limit * 0.8:
-            print(f"\n{prefix}[Context at 80%, compacting...]", flush=True)
-            try:
-                n = compact(history)
-                print(f"{prefix}[Compacted: {n} messages removed]")
-                history.append(HumanMessage(content="Continue with the task described above."))
-            except Exception as e:
-                print(f"{prefix}[Auto-compact failed: {e}]")
+        if _auto_compact(history, prefix=prefix):
+            history.append(HumanMessage(content="Please continue."))
         full_response = None
         tool_call_started = False
         printer = StreamPrinter(prefix)
@@ -268,13 +276,7 @@ if __name__ == "__main__":
                 if ctx.should_exit:
                     break
                 continue
-            if usage._tracker.context_tokens_used() > usage._tracker.context_limit * 0.8:
-                print("\n[Context at 80%, compacting...]", flush=True)
-                try:
-                    n = compact(history)
-                    print(f"[Compacted: {n} messages removed]")
-                except Exception as e:
-                    print(f"[Auto-compact failed: {e}]")
+            _auto_compact(history)
             print("Agent: ", end="", flush=True)
             run_agent(user_msg, history)
     except (KeyboardInterrupt, EOFError):
