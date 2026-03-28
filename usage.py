@@ -86,6 +86,10 @@ class UsageTracker:
     def context_tokens_used(self) -> int:
         return self._records[-1].input if self._records else 0
 
+    def reset(self):
+        """Clear per-call records after a compact. Preserves session totals."""
+        self._records.clear()
+
     def set_limit(self, limit: int):
         self._context_limit = limit
 

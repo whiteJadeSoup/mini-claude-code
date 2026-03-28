@@ -27,7 +27,7 @@ def _build_system_prompt() -> str:
     """Dynamic — rebuilt each turn so newly discovered skills appear."""
     return (
         f"You are a coding agent in: {config.CWD}\n"
-        f"Answer questions and have conversations normally. Use tools when the task requires action.\n"
+        f"Answer questions and chat normally without tools. Use tools only when the task actually requires running code, reading files, or taking action — not for simple questions or greetings.\n"
         f"\n"
         f"## execute_command\n"
         f"Use execute_command for all file operations and shell tasks. Examples (not exhaustive):\n"
@@ -129,6 +129,7 @@ def compact(history: list, custom_instructions: str = "") -> int:
     if custom_instructions:
         formatted += f"\n\n## Compact Instructions\n{custom_instructions}"
     system_msg = history[0]
+    usage._tracker.reset()
     response = None
     with _sub_agent_scope("compact"):
         messages = [SystemMessage(content=prompt), HumanMessage(content=formatted)]
@@ -141,7 +142,7 @@ def compact(history: list, custom_instructions: str = "") -> int:
     history.append(system_msg)
     history.append(HumanMessage(content=f"[Previous conversation summary]\n\n{summary}"))
     history.append(AIMessage(content="Understood. I have the context. How can I help?"))
-    return original_len - len(history)
+    return max(0, original_len - len(history))
 
 
 # --- Loop ---
@@ -150,6 +151,14 @@ def compact(history: list, custom_instructions: str = "") -> int:
 def _run_loop(bound_llm, history, tools_by_name, prefix="", source="agent"):
     while True:
         _clear_old_tool_results(history)
+        if usage._tracker.context_tokens_used() > usage._tracker.context_limit * 0.8:
+            print(f"\n{prefix}[Context at 80%, compacting...]", flush=True)
+            try:
+                n = compact(history)
+                print(f"{prefix}[Compacted: {n} messages removed]")
+                history.append(HumanMessage(content="Continue with the task described above."))
+            except Exception as e:
+                print(f"{prefix}[Auto-compact failed: {e}]")
         full_response = None
         tool_call_started = False
         printer = StreamPrinter(prefix)
