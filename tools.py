@@ -59,8 +59,16 @@ def execute_command(command: str, timeout: int = 120) -> str:
     if _SENSITIVE_RE.search(command):
         return "Error: command references a sensitive file and was blocked."
     try:
-        result = subprocess.run(command, shell=True, cwd=config.CWD,
-                                capture_output=True, timeout=timeout)
+        if config.BASH_PATH:
+            result = subprocess.run(
+                [config.BASH_PATH, "-c", command],
+                cwd=config.CWD, capture_output=True, timeout=timeout,
+            )
+        else:
+            result = subprocess.run(
+                command, shell=True, cwd=config.CWD,
+                capture_output=True, timeout=timeout,
+            )
     except subprocess.TimeoutExpired:
         return f"Error: command timed out after {timeout}s"
     except subprocess.SubprocessError as e:

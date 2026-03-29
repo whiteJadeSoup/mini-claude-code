@@ -1,6 +1,8 @@
-import os
+import os, platform, shutil
 
 CWD = os.getcwd()
+PLATFORM = platform.system()        # "Windows" / "Linux" / "Darwin"
+BASH_PATH = shutil.which("bash")    # Git Bash on Windows, /bin/bash on Unix, or None
 
 
 def safe_path(path: str) -> str:

@@ -23,10 +23,16 @@ from tools import (execute_command, write_file, edit_file,
 # --- Prompts ---
 
 
+def _platform_line() -> str:
+    shell = "bash" if config.BASH_PATH else ("cmd.exe" if config.PLATFORM == "Windows" else "sh")
+    return f"Platform: {config.PLATFORM} ({shell})"
+
+
 def _build_system_prompt() -> str:
     """Dynamic — rebuilt each turn so newly discovered skills appear."""
     return (
         f"You are a coding agent in: {config.CWD}\n"
+        f"{_platform_line()}\n"
         f"Answer questions and chat normally without tools. Use tools only when the task actually requires running code, reading files, or taking action — not for simple questions or greetings.\n"
         f"\n"
         f"## execute_command\n"
@@ -51,6 +57,7 @@ def _build_system_prompt() -> str:
     )
 SUB_SYSTEM_PROMPT = (
     f"You are a sub-agent in: {config.CWD}\n"
+    f"{_platform_line()}\n"
     f"Complete the task using tools. Plan with plan_todos, track with update_todo.\n"
     f"When done, briefly summarize what was accomplished."
 )
