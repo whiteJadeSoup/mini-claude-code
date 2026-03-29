@@ -5,24 +5,28 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 import config
 import todos
+import tasks
 import skills
 import usage
 import prompts
 from todos import TodoManager
+from tasks import TaskManager
 from usage import UsageTracker
 
 
 @contextmanager
 def _sub_agent_scope(label: str):
     """Isolate a sub-agent by swapping global singletons; merges usage on exit."""
-    saved_todos, saved_tracker = todos._todos, usage._tracker
+    saved_todos, saved_tasks, saved_tracker = todos._todos, tasks._tasks, usage._tracker
     todos._todos = TodoManager()
+    tasks._tasks = TaskManager()  # no persist_path → in-memory only, no DAG state leak
     usage._tracker = UsageTracker()
     try:
         yield
     finally:
         sub_tracker = usage._tracker
         todos._todos = saved_todos
+        tasks._tasks = saved_tasks
         usage._tracker = saved_tracker
         usage._tracker.merge_sub(label, sub_tracker)
 
@@ -164,6 +168,56 @@ def update_todo(item: str, status: str) -> str:
         update_todo("Read existing code", "done")
     """
     return todos._todos.update(item, status)
+
+
+@tool
+def plan_tasks(tasks_list: list[dict]) -> str:
+    """Set a dependency-aware task graph, replacing any existing plan.
+
+    Use when: complex work with 3+ steps where some steps have prerequisites.
+    Don't use for: simple checklists with no dependencies — use plan_todos instead.
+
+    Args:
+        tasks_list: List of task dicts. Each dict must have:
+            - id (str): unique identifier, used in depends_on references
+            - description (str): what the task does
+            - depends_on (list[str], optional): ids that must be done first
+
+    Examples:
+        plan_tasks([
+            {"id": "read", "description": "Read existing code"},
+            {"id": "impl", "description": "Implement feature", "depends_on": ["read"]},
+            {"id": "test", "description": "Write tests", "depends_on": ["impl"]},
+        ])
+        plan_tasks([
+            {"id": "setup", "description": "Install deps"},
+            {"id": "backend", "description": "Write backend", "depends_on": ["setup"]},
+            {"id": "frontend", "description": "Write frontend", "depends_on": ["setup"]},
+            {"id": "integrate", "description": "Integration test", "depends_on": ["backend", "frontend"]},
+        ])
+    """
+    return tasks._tasks.plan(tasks_list)
+
+
+@tool
+def update_task(task_id: str, status: str) -> str:
+    """Update the status of a task in the dependency graph.
+
+    Use when: marking a task in_progress before starting it, or done after completing it.
+    Don't use for: adding tasks — use plan_tasks to set the full graph upfront.
+
+    Args:
+        task_id: The id string of the task (as declared in plan_tasks).
+        status: One of "pending", "in_progress", or "done".
+
+    Note: starting a task whose dependencies aren't done will return an error.
+
+    Examples:
+        update_task("read", "in_progress")
+        update_task("read", "done")
+        update_task("impl", "in_progress")  # only valid after "read" is done
+    """
+    return tasks._tasks.update(task_id, status)
 
 
 @tool

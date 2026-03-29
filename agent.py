@@ -14,12 +14,14 @@ from langchain_openai import ChatOpenAI
 
 import config
 import todos
+import tasks
 import usage
 import prompts
 from skills import _skill_manager
 from printer import StreamPrinter, ThinkingIndicator
 from tools import (execute_command, write_file, edit_file,
-                   plan_todos, update_todo, run_skill, task, _sub_agent_scope)
+                   plan_todos, update_todo, plan_tasks, update_task,
+                   run_skill, task, _sub_agent_scope)
 
 
 def _build_system_prompt() -> str:
@@ -38,7 +40,8 @@ _llm_base = ChatOpenAI(
 )
 
 # Sub-agents get basic tools only — no task or run_skill to prevent nesting.
-SUB_TOOLS = [plan_todos, update_todo, execute_command, write_file, edit_file]
+SUB_TOOLS = [plan_todos, update_todo, plan_tasks, update_task,
+             execute_command, write_file, edit_file]
 SUB_TOOLS_BY_NAME = {t.name: t for t in SUB_TOOLS}
 
 MAIN_TOOLS = [task, run_skill] + SUB_TOOLS
@@ -125,6 +128,12 @@ def compact(history: list, custom_instructions: str = "") -> int:
     history.append(system_msg)
     history.append(HumanMessage(content=f"[Previous conversation summary]\n\n{summary}"))
     history.append(AIMessage(content="Understood. I have the context. How can I help?"))
+    # Inject task state as a human turn so the LLM sees current task plan.
+    # Kept outside the system prompt to preserve DeepSeek prefix cache stability.
+    task_state = tasks._tasks.state_summary()
+    if task_state:
+        history.append(HumanMessage(content=task_state))
+        history.append(AIMessage(content="Acknowledged. I have the current task plan."))
     return max(0, original_len - len(history))
 
 
@@ -227,6 +236,11 @@ if __name__ == "__main__":
     sync_skill_commands(_skill_manager)
 
     history = [SystemMessage(content=_build_system_prompt())]
+    # Restore any incomplete task plan that survived a previous process exit.
+    task_state = tasks._tasks.state_summary()
+    if task_state:
+        history.append(HumanMessage(content=task_state))
+        history.append(AIMessage(content="Acknowledged. I have the current task plan."))
     ctx = CommandContext(
         history=history,
         tracker=usage._tracker,

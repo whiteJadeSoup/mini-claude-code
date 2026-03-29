@@ -30,7 +30,8 @@ def build_system_prompt(skill_section: str = "") -> str:
         f"Use edit_file only for targeted string replacements in existing files.\n"
         f"\n"
         f"## Workflow\n"
-        f"Complex tasks (3+ steps): plan_todos → update_todo(in_progress) → work → update_todo(done).\n"
+        f"Simple checklists (no dependencies): plan_todos → update_todo(in_progress) → work → update_todo(done).\n"
+        f"Complex tasks with dependencies: plan_tasks (declare depends_on) → update_task(in_progress) → work → update_task(done).\n"
         f"Independent subtasks: use the task tool.\n"
         f"Domain knowledge: use run_skill to execute skills in isolated context."
         + skill_section
@@ -40,7 +41,8 @@ def build_system_prompt(skill_section: str = "") -> str:
 SUB_SYSTEM_PROMPT = (
     f"You are a sub-agent in: {config.CWD}\n"
     f"{_platform_line()}\n"
-    f"Complete the task using tools. Plan with plan_todos, track with update_todo.\n"
+    f"Complete the task using tools.\n"
+    f"Simple checklists: plan_todos → update_todo. Tasks with dependencies: plan_tasks → update_task.\n"
     f"When done, briefly summarize what was accomplished."
 )
 
