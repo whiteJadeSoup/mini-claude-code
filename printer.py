@@ -1,4 +1,7 @@
 import re
+import sys
+import threading
+import time
 
 # LLMs insert spurious spaces between CJK characters during streaming
 # (token boundaries often split mid-word). These regexes detect and strip them.
@@ -90,3 +93,39 @@ class StreamPrinter:
         self.flush()
         print()
         self._at_line_start = True
+
+
+class ThinkingIndicator:
+    """Live [Thinking... Xs] indicator, auto-hidden on first real output."""
+
+    DELAY = 0.5  # seconds before first display
+
+    def __init__(self, prefix: str = ""):
+        self._prefix = prefix
+        self._start = time.time()
+        self._stop_event = threading.Event()
+        self._written = 0
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        while not self._stop_event.wait(0.1):
+            self._update()
+
+    def _update(self):
+        elapsed = time.time() - self._start
+        if elapsed < self.DELAY:
+            return
+        text = f"{self._prefix}[Thinking... {elapsed:.1f}s]"
+        sys.stdout.write("\b \b" * self._written)
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        self._written = len(text)
+
+    def stop(self) -> float:
+        """Stop thread, erase indicator text, return elapsed seconds."""
+        self._stop_event.set()
+        self._thread.join()
+        sys.stdout.write("\b \b" * self._written)
+        sys.stdout.flush()
+        return time.time() - self._start

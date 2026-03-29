@@ -41,7 +41,7 @@ A minimal coding agent built as a manual agentic loop — no framework wrappers.
 
 ## Planning
 
-Plans must lead with overview (with diagrams), design goals, and design principles before implementation details. Use diagrams liberally: architecture diagrams in overview, flow diagrams in implementation sections.
+Follow the Design Plan Guide in the global `~/.claude/CLAUDE.md`.
 
 ## Code Style
 

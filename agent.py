@@ -16,8 +16,8 @@ import config
 import todos
 import usage
 from skills import _skill_manager
-from printer import StreamPrinter
-from tools import (execute_command, edit_file,
+from printer import StreamPrinter, ThinkingIndicator
+from tools import (execute_command, write_file, edit_file,
                    plan_todos, update_todo, run_skill, task, _sub_agent_scope)
 
 # --- Prompts ---
@@ -36,6 +36,9 @@ def _build_system_prompt() -> str:
         f"- Find files: find, ls, tree\n"
         f"- Write/create files: cat <<'EOF' > file, echo, tee, mkdir\n"
         f"- Run scripts, installs, git, and any other commands\n"
+        f"\n"
+        f"## write_file\n"
+        f"Use write_file to create new files or fully overwrite existing files.\n"
         f"\n"
         f"## edit_file\n"
         f"Use edit_file only for targeted string replacements in existing files.\n"
@@ -64,7 +67,7 @@ _llm_base = ChatOpenAI(
 )
 
 # Sub-agents get basic tools only — no task or run_skill to prevent nesting.
-SUB_TOOLS = [plan_todos, update_todo, execute_command, edit_file]
+SUB_TOOLS = [plan_todos, update_todo, execute_command, write_file, edit_file]
 SUB_TOOLS_BY_NAME = {t.name: t for t in SUB_TOOLS}
 
 MAIN_TOOLS = [task, run_skill] + SUB_TOOLS
@@ -170,11 +173,15 @@ def _run_loop(bound_llm, history, tools_by_name, prefix="", source="agent"):
         full_response = None
         tool_call_started = False
         printer = StreamPrinter(prefix)
+        indicator = ThinkingIndicator(prefix)
 
         try:
             for chunk in bound_llm.stream(history):
                 # LangChain chunks support __add__ — accumulates content + tool calls
                 full_response = chunk if full_response is None else full_response + chunk
+                if indicator and (chunk.content or chunk.tool_call_chunks):
+                    indicator.stop()
+                    indicator = None
                 if chunk.content:
                     printer.write(chunk.content)
                 for tc in chunk.tool_call_chunks:
@@ -186,6 +193,9 @@ def _run_loop(bound_llm, history, tools_by_name, prefix="", source="agent"):
         except Exception as e:
             printer.newline()
             raise RuntimeError(f"LLM stream error: {e}") from e
+        finally:
+            if indicator:
+                indicator.stop()
 
         if full_response is None:
             printer.newline()

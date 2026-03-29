@@ -74,6 +74,28 @@ def execute_command(command: str, timeout: int = 120) -> str:
 
 
 @tool
+def write_file(path: str, content: str) -> str:
+    """Create or fully overwrite a file with the given content.
+
+    Use when: creating a new file, or replacing an entire file's content.
+    Don't use for: small targeted edits to existing files — use edit_file instead.
+
+    Args:
+        path: Relative path to the file to create or overwrite.
+        content: The full text content to write to the file.
+
+    Examples:
+        write_file("hello.py", "print('hello')")
+        write_file("config/settings.json", '{"debug": true}')
+    """
+    p = config.safe_path(path)
+    os.makedirs(os.path.dirname(p) or ".", exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        f.write(content)
+    return f"Written to {path}"
+
+
+@tool
 def edit_file(path: str, old_string: str, new_string: str) -> str:
     """Replace the first occurrence of old_string with new_string in a file.
 
