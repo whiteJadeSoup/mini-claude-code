@@ -7,6 +7,7 @@ import config
 import todos
 import skills
 import usage
+import prompts
 from todos import TodoManager
 from usage import UsageTracker
 
@@ -214,7 +215,7 @@ def task(description: str) -> str:
     import agent  # lazy import — agent imports tools, so we break the cycle here
     with _sub_agent_scope(description):
         sub_llm = agent._llm_base.bind_tools(agent.SUB_TOOLS)
-        history = [SystemMessage(content=agent.SUB_SYSTEM_PROMPT), HumanMessage(content=description)]
+        history = [SystemMessage(content=prompts.SUB_SYSTEM_PROMPT), HumanMessage(content=description)]
         print(f"\n  [sub-agent: {description}]")
         response = agent._run_loop(sub_llm, history, agent.SUB_TOOLS_BY_NAME, prefix="  ")
     return response.content or "(completed, no summary)"

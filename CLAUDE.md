@@ -23,13 +23,14 @@ A minimal coding agent built as a manual agentic loop — no framework wrappers.
 
 | File | Responsibility |
 |------|---------------|
-| `agent.py` | Entry point — LLM setup, prompts, `_run_loop()`, `run_agent()`, main loop |
+| `agent.py` | Entry point — LLM setup, `_run_loop()`, `run_agent()`, main loop |
 | `commands.py` | `CommandRegistry` + `CommandContext` + built-in commands + `sync_skill_commands()` |
 | `tools.py` | All `@tool` functions including `task` (uses lazy `import agent` to break circular dep) |
 | `skills.py` | `SkillManager` class + `_skill_manager` singleton |
 | `todos.py` | `TodoManager` class + `_todos` instance |
-| `printer.py` | `StreamPrinter` + CJK spacing utilities |
-| `config.py` | `CWD`, `safe_path()` |
+| `prompts.py` | All prompt templates: `build_system_prompt()`, `SUB_SYSTEM_PROMPT`, `COMPACT_PROMPT` |
+| `printer.py` | `StreamPrinter` + `ThinkingIndicator` + CJK spacing utilities |
+| `config.py` | `CWD`, `safe_path()`, `PLATFORM`, `BASH_PATH` |
 
 ### Key conventions
 
@@ -41,7 +42,26 @@ A minimal coding agent built as a manual agentic loop — no framework wrappers.
 
 ## Planning
 
-Follow the Design Plan Guide in the global `~/.claude/CLAUDE.md`.
+Follow the Design Plan Guide in `~/.claude/CLAUDE.md`. Required structure:
+
+**Overview Design** (6 sections in order):
+1. Problem Statement — pain point only, no solution
+2. Goals & Non-Goals — goals must be verifiable; non-goals prevent scope creep
+3. Architecture Overview — diagram with solid/dashed/gray for existing/new/removed; group by responsibility
+4. Core Flows — sequence/flow diagrams; module-level participants, no function names
+5. Key Decisions & Alternatives — title states what was chosen; body explains rationale; include rejected alternatives
+6. Risks & Open Questions
+
+**Detail Design** (7 sections):
+1. Module Responsibilities & Interfaces — full contract, mark incremental changes
+2. Data Model / Schema — fields, constraints, query patterns, migration
+3. Core Algorithms / State Machines — only non-obvious logic; include invariants
+4. Error Handling — per external interaction point: failure modes, handling strategy
+5. Key Flows — same as overview but with function-level detail
+6. Performance Estimation — only when goals have quantitative targets
+7. Testing Strategy — what/how/pass criteria; mock boundaries and why
+
+**Writing rules**: every section traces to a design goal; diagrams over prose; record *why* not *what*.
 
 ## Code Style
 

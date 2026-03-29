@@ -15,52 +15,16 @@ from langchain_openai import ChatOpenAI
 import config
 import todos
 import usage
+import prompts
 from skills import _skill_manager
 from printer import StreamPrinter, ThinkingIndicator
 from tools import (execute_command, write_file, edit_file,
                    plan_todos, update_todo, run_skill, task, _sub_agent_scope)
 
-# --- Prompts ---
-
-
-def _platform_line() -> str:
-    shell = "bash" if config.BASH_PATH else ("cmd.exe" if config.PLATFORM == "Windows" else "sh")
-    return f"Platform: {config.PLATFORM} ({shell})"
-
 
 def _build_system_prompt() -> str:
     """Dynamic — rebuilt each turn so newly discovered skills appear."""
-    return (
-        f"You are a coding agent in: {config.CWD}\n"
-        f"{_platform_line()}\n"
-        f"Answer questions and chat normally without tools. Use tools only when the task actually requires running code, reading files, or taking action — not for simple questions or greetings.\n"
-        f"\n"
-        f"## execute_command\n"
-        f"Use execute_command for all file operations and shell tasks. Examples (not exhaustive):\n"
-        f"- Read files: cat, head, tail\n"
-        f"- Search content: grep, rg, awk\n"
-        f"- Find files: find, ls, tree\n"
-        f"- Write/create files: cat <<'EOF' > file, echo, tee, mkdir\n"
-        f"- Run scripts, installs, git, and any other commands\n"
-        f"\n"
-        f"## write_file\n"
-        f"Use write_file to create new files or fully overwrite existing files.\n"
-        f"\n"
-        f"## edit_file\n"
-        f"Use edit_file only for targeted string replacements in existing files.\n"
-        f"\n"
-        f"## Workflow\n"
-        f"Complex tasks (3+ steps): plan_todos → update_todo(in_progress) → work → update_todo(done).\n"
-        f"Independent subtasks: use the task tool.\n"
-        f"Domain knowledge: use run_skill to execute skills in isolated context."
-        + _skill_manager.prompt_section()
-    )
-SUB_SYSTEM_PROMPT = (
-    f"You are a sub-agent in: {config.CWD}\n"
-    f"{_platform_line()}\n"
-    f"Complete the task using tools. Plan with plan_todos, track with update_todo.\n"
-    f"When done, briefly summarize what was accomplished."
-)
+    return prompts.build_system_prompt(_skill_manager.prompt_section())
 
 # --- LLM & Tools ---
 
@@ -101,11 +65,6 @@ def _clear_old_tool_results(history: list) -> None:
         if isinstance(msg, ToolMessage) and not msg.content.startswith("[Cleared]"):
             history[i] = ToolMessage(content="[Cleared]", tool_call_id=msg.tool_call_id)
 
-
-def _load_compact_prompt() -> str:
-    path = os.path.join(config.CWD, "prompts", "compact.md")
-    with open(path, encoding="utf-8") as f:
-        return f.read()
 
 
 def _format_history_for_summary(messages: list) -> str:
@@ -148,7 +107,7 @@ def compact(history: list, custom_instructions: str = "") -> int:
     Returns the number of messages removed. Raises on LLM failure so the
     caller can decide whether to abort or continue with unmodified history.
     """
-    prompt = _load_compact_prompt()
+    prompt = prompts.COMPACT_PROMPT
     formatted = _format_history_for_summary(history[1:])  # skip SystemMessage
     if custom_instructions:
         formatted += f"\n\n## Compact Instructions\n{custom_instructions}"
