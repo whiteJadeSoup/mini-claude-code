@@ -62,7 +62,7 @@ def execute_command(command: str, timeout: int = 120) -> str:
     try:
         if config.BASH_PATH:
             result = subprocess.run(
-                [config.BASH_PATH, "-c", command],
+                [config.BASH_PATH, "--login", "-c", command],
                 cwd=config.CWD, capture_output=True, timeout=timeout,
             )
         else:
