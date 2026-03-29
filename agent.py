@@ -104,6 +104,17 @@ def _auto_compact(history: list, prefix: str = "") -> bool:
         return False
 
 
+def _inject_task_state(history: list) -> None:
+    """Append current task plan as a human turn if incomplete tasks exist.
+
+    Kept out of the system prompt to preserve DeepSeek prefix cache stability.
+    """
+    state = tasks._tasks.state_summary()
+    if state:
+        history.append(HumanMessage(content=state))
+        history.append(AIMessage(content="Acknowledged. I have the current task plan."))
+
+
 def compact(history: list, custom_instructions: str = "") -> int:
     """Layer 2: summarize conversation via sub-agent and rebuild history.
 
@@ -128,12 +139,7 @@ def compact(history: list, custom_instructions: str = "") -> int:
     history.append(system_msg)
     history.append(HumanMessage(content=f"[Previous conversation summary]\n\n{summary}"))
     history.append(AIMessage(content="Understood. I have the context. How can I help?"))
-    # Inject task state as a human turn so the LLM sees current task plan.
-    # Kept outside the system prompt to preserve DeepSeek prefix cache stability.
-    task_state = tasks._tasks.state_summary()
-    if task_state:
-        history.append(HumanMessage(content=task_state))
-        history.append(AIMessage(content="Acknowledged. I have the current task plan."))
+    _inject_task_state(history)
     return max(0, original_len - len(history))
 
 
@@ -236,11 +242,7 @@ if __name__ == "__main__":
     sync_skill_commands(_skill_manager)
 
     history = [SystemMessage(content=_build_system_prompt())]
-    # Restore any incomplete task plan that survived a previous process exit.
-    task_state = tasks._tasks.state_summary()
-    if task_state:
-        history.append(HumanMessage(content=task_state))
-        history.append(AIMessage(content="Acknowledged. I have the current task plan."))
+    _inject_task_state(history)  # restore incomplete tasks from previous process exit
     ctx = CommandContext(
         history=history,
         tracker=usage._tracker,
