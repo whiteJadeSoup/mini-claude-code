@@ -2,7 +2,23 @@ import os, platform, shutil
 
 CWD = os.getcwd()
 PLATFORM = platform.system()        # "Windows" / "Linux" / "Darwin"
-BASH_PATH = shutil.which("bash")    # Git Bash on Windows, /bin/bash on Unix, or None
+def _find_bash() -> str | None:
+    """Find a working bash. On Windows, prefer Git Bash over WSL."""
+    if PLATFORM != "Windows":
+        return shutil.which("bash")
+    # Derive Git Bash from git.exe location: git is at <git_root>/cmd/git.exe
+    # or <git_root>/mingw64/bin/git.exe → walk up to find <git_root>/usr/bin/bash.exe
+    git_path = shutil.which("git")
+    if git_path:
+        d = os.path.dirname(os.path.realpath(git_path))
+        for _ in range(4):
+            bash = os.path.join(d, "usr", "bin", "bash.exe")
+            if os.path.isfile(bash):
+                return bash
+            d = os.path.dirname(d)
+    return None
+
+BASH_PATH = _find_bash()
 
 
 def safe_path(path: str) -> str:
