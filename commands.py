@@ -92,6 +92,15 @@ def cmd_compact(args, ctx):
         print(f"[Compact failed: {e}]")
 
 
+@registry.register("tasks")
+def cmd_tasks(args, ctx):
+    import tasks as t
+    if args.strip() == "clear":
+        print(t._tasks.clear())
+    else:
+        print(t._tasks.render())
+
+
 @registry.register("skills")
 def cmd_skills(args, ctx):
     names = skills._skill_manager.names()

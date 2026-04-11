@@ -28,6 +28,7 @@ A minimal coding agent built as a manual agentic loop — no framework wrappers.
 | `tools.py` | All `@tool` functions including `task` (uses lazy `import agent` to break circular dep) |
 | `skills.py` | `SkillManager` class + `_skill_manager` singleton |
 | `todos.py` | `TodoManager` class + `_todos` instance |
+| `tasks.py` | `TaskManager` class + `_tasks` singleton — DAG-aware task tracking with persistence |
 | `prompts.py` | All prompt templates: `build_system_prompt()`, `SUB_SYSTEM_PROMPT`, `COMPACT_PROMPT` |
 | `printer.py` | `StreamPrinter` + `ThinkingIndicator` + CJK spacing utilities |
 | `config.py` | `CWD`, `safe_path()`, `PLATFORM`, `BASH_PATH` |
@@ -35,7 +36,7 @@ A minimal coding agent built as a manual agentic loop — no framework wrappers.
 ### Key conventions
 
 - **`task` lazy import**: `task` in `tools.py` does `import agent` inside the function body (not at module level) to avoid the circular dependency with `agent.py` importing from `tools.py`.
-- **`todos._todos` access**: `_todos` is reassigned (not just mutated) by `task` for sub-agent isolation. Always access via `todos._todos` (module attribute), never `from todos import _todos`.
+- **`todos._todos` / `tasks._tasks` access**: both are reassigned (not just mutated) by `_sub_agent_scope` for sub-agent isolation. Always access as `todos._todos` / `tasks._tasks` (module attribute), never via `from todos import _todos`.
 - **`load_dotenv()` ordering**: must be the first statement in `agent.py`, before any project imports that read env vars.
 - **Tool docstrings**: Google-style with "Use when / Don't use for" guidance and concrete examples.
 - **Skill system**: skills live in `skills/<name>/SKILL.md` with YAML frontmatter (`name`, `description`). Frontmatter is rescanned each turn for auto-discovery. `run_skill` executes skills in a sub-agent (body as system prompt, never enters main history). Users invoke with `/skill-name <request>`.
