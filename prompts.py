@@ -47,6 +47,15 @@ SUB_SYSTEM_PROMPT = (
 )
 
 COMPACT_PROMPT = """\
+CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
+
+- Do NOT use Read, Bash, Grep, Glob, Edit, Write, or ANY other tool.
+- You already have all the context you need in the conversation above.
+- Tool calls will be REJECTED and will waste your only turn — you will fail the task.
+- Your entire response must be plain text: an <analysis> block followed by a <summary> block.
+
+---
+
 Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
 This summary should be thorough in capturing technical details, code patterns, and architectural decisions that would be essential for continuing development work without losing context.
 
@@ -141,4 +150,8 @@ When summarizing the conversation focus on typescript code changes and also reme
 <example>
 # Summary instructions
 When you are using compact - please focus on test output and code changes. Include file reads verbatim.
-</example>"""
+</example>
+
+---
+
+REMINDER: Do NOT call any tools. Respond with plain text only — an <analysis> block followed by a <summary> block. Tool calls will be rejected and you will fail the task."""
