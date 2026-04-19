@@ -36,6 +36,11 @@ class UsageTracker:
         self._total_out: int = 0
         self._total_cache: int = 0
         self._total_reasoning: int = 0
+        self._streaming_out: int = 0  # chunk proxy during active streaming
+
+    def count_stream_chunk(self) -> None:
+        """Increment the live output-token proxy by one streaming chunk."""
+        self._streaming_out += 1
 
     def record(self, source: str, usage_metadata: dict | None,
                response_metadata: dict | None = None):
@@ -56,6 +61,7 @@ class UsageTracker:
         self._records.append(rec)
         self._total_in += rec.input
         self._total_out += rec.output
+        self._streaming_out = 0  # exact value now in _total_out
         self._total_cache += rec.cache_read
         self._total_reasoning += rec.reasoning
         if response_metadata and (model := response_metadata.get("model_name")):
@@ -86,6 +92,26 @@ class UsageTracker:
     def context_tokens_used(self) -> int:
         return self._records[-1].input if self._records else 0
 
+    def projected_next_input(self) -> int:
+        """Lower-bound estimate of the next API call's input token count.
+
+        Next input >= last_input + last_output, because the model's response
+        is appended to history before the next call. Tool results on top of
+        that are handled separately by the character-based estimate.
+        DeepSeek's input_tokens already includes cache_read (cache is a subset
+        of input, not additive).
+        """
+        if not self._records:
+            return 0
+        r = self._records[-1]
+        return r.input + r.output
+
+    def input_tokens_used(self) -> int:
+        return self._total_in
+
+    def output_tokens_used(self) -> int:
+        return self._total_out + self._streaming_out
+
     def reset(self):
         """Clear per-call records after a compact. Preserves session totals."""
         self._records.clear()
@@ -93,28 +119,30 @@ class UsageTracker:
     def set_limit(self, limit: int):
         self._context_limit = limit
 
-    def summary(self, history_len: int):
+    def summary(self, history_len: int, console: Console | None = None) -> None:
         """Render /context output using rich.
 
         Context % is based on the last call's input tokens — that's the
         actual context window consumption, since every call sends full history.
+        Pass a custom console to capture output (e.g. StringIO-backed Console).
         """
-        last_input = self._records[-1].input if self._records else 0
+        c = console or _console
+        last_input = self.context_tokens_used()
         pct = last_input / self._context_limit * 100 if self._context_limit else 0
         color = "green" if pct < 50 else "yellow" if pct < 80 else "red"
 
-        _console.print(f"[bold]Model:[/]    {self._model or 'unknown'}")
-        _console.print(f"[bold]Context:[/]  [{color}]{last_input:,} / {self._context_limit:,} ({pct:.1f}%)[/]")
-        _console.print(f"[bold]History:[/]  {history_len} messages")
+        c.print(f"[bold]Model:[/]    {self._model or 'unknown'}")
+        c.print(f"[bold]Context:[/]  [{color}]{last_input:,} / {self._context_limit:,} ({pct:.1f}%)[/]")
+        c.print(f"[bold]History:[/]  {history_len} messages")
 
         if not self._records:
-            _console.print("(no LLM calls yet)")
+            c.print("(no LLM calls yet)")
             return
 
         table = Table(show_header=True, show_footer=True, show_edge=False, pad_edge=False)
         table.add_column("#", style="dim", footer_style="dim")
         table.add_column("Source", footer="Total")
-        table.add_column("Input", justify="right", footer=f"{self._total_in:,}")
+        table.add_column("Input", justify="right", footer="-")
         table.add_column("Output", justify="right", footer=f"{self._total_out:,}")
         table.add_column("Cache", justify="right",
                          footer=f"{self._total_cache:,}" if self._total_cache else "-")
@@ -129,7 +157,7 @@ class UsageTracker:
                 f"{r.cache_read:,}" if r.cache_read else "-",
                 f"{r.reasoning:,}" if r.reasoning else "-",
             )
-        _console.print(table)
+        c.print(table)
 
 
 # NOTE: _tracker is swapped by task tool for sub-agent isolation.

@@ -1,28 +1,28 @@
-import subprocess, os, locale, re
+import asyncio, subprocess, os, locale, re, sys
 from contextlib import contextmanager
 from langchain_core.tools import tool
-from langchain_core.messages import HumanMessage, SystemMessage
 
-import config
-import todos
-import skills
-import usage
-import prompts
-from todos import TodoManager
-from usage import UsageTracker
+from mini_cc import config, prompts
+from mini_cc.state import tasks, todos, usage
+from mini_cc.state.tasks import TaskManager
+from mini_cc.state.todos import TodoManager
+from mini_cc.state.usage import UsageTracker
+from mini_cc.tools import skills
 
 
 @contextmanager
 def _sub_agent_scope(label: str):
     """Isolate a sub-agent by swapping global singletons; merges usage on exit."""
-    saved_todos, saved_tracker = todos._todos, usage._tracker
+    saved_todos, saved_tasks, saved_tracker = todos._todos, tasks._tasks, usage._tracker
     todos._todos = TodoManager()
+    tasks._tasks = TaskManager()  # no persist_path → in-memory only, no DAG state leak
     usage._tracker = UsageTracker()
     try:
         yield
     finally:
         sub_tracker = usage._tracker
         todos._todos = saved_todos
+        tasks._tasks = saved_tasks
         usage._tracker = saved_tracker
         usage._tracker.merge_sub(label, sub_tracker)
 
@@ -37,8 +37,22 @@ _SENSITIVE_PATTERNS = [
 _SENSITIVE_RE = re.compile("|".join(_SENSITIVE_PATTERNS), re.I)
 
 
+def _kill_tree(pid: int) -> None:
+    """Kill a process and all its descendants."""
+    if sys.platform == "win32":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            capture_output=True,
+        )
+    else:
+        try:
+            os.killpg(os.getpgid(pid), 9)
+        except (ProcessLookupError, OSError):
+            pass
+
+
 @tool
-def execute_command(command: str, timeout: int = 120) -> str:
+async def execute_command(command: str, timeout: int = 120) -> str:
     """Run a shell command and return stdout + stderr.
 
     Use when: running scripts, installs, git operations, reading/writing/searching files, or any shell task.
@@ -61,20 +75,38 @@ def execute_command(command: str, timeout: int = 120) -> str:
         return "Error: command references a sensitive file and was blocked."
     try:
         if config.BASH_PATH:
-            result = subprocess.run(
-                [config.BASH_PATH, "--login", "-c", command],
-                cwd=config.CWD, capture_output=True, timeout=timeout,
+            proc = await asyncio.create_subprocess_exec(
+                config.BASH_PATH, "--login", "-c", command,
+                cwd=config.CWD,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
         else:
-            result = subprocess.run(
-                command, shell=True, cwd=config.CWD,
-                capture_output=True, timeout=timeout,
+            proc = await asyncio.create_subprocess_shell(
+                command,
+                cwd=config.CWD,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
-    except subprocess.TimeoutExpired:
-        return f"Error: command timed out after {timeout}s"
-    except subprocess.SubprocessError as e:
+    except OSError as e:
         return f"Error: {e}"
-    raw = result.stdout + result.stderr
+
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        _kill_tree(proc.pid)
+        proc.kill()
+        return f"Error: command timed out after {timeout}s"
+    except BaseException:
+        # CancelledError or any unexpected error — kill process tree then re-raise
+        _kill_tree(proc.pid)
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise
+
+    raw = (stdout or b"") + (stderr or b"")
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -167,7 +199,51 @@ def update_todo(item: str, status: str) -> str:
 
 
 @tool
-def run_skill(name: str, request: str, context: str = "") -> str:
+def plan_tasks(tasks_list: list[dict]) -> str:
+    """Set a dependency-aware task graph, replacing any existing plan.
+
+    Use when: complex work with 3+ steps where some steps have prerequisites.
+    Don't use for: simple checklists with no dependencies — use plan_todos instead.
+
+    Args:
+        tasks_list: List of task dicts. Each dict must have:
+            - id (str): unique identifier, used in depends_on references
+            - description (str): what the task does
+            - depends_on (list[str], optional): ids that must be done first
+
+    Examples:
+        plan_tasks([
+            {"id": "read", "description": "Read existing code"},
+            {"id": "impl", "description": "Implement feature", "depends_on": ["read"]},
+            {"id": "test", "description": "Write tests", "depends_on": ["impl"]},
+        ])
+    """
+    return tasks._tasks.plan(tasks_list)
+
+
+@tool
+def update_task(task_id: str, status: str) -> str:
+    """Update the status of a task in the dependency graph.
+
+    Use when: marking a task in_progress before starting it, or done after completing it.
+    Don't use for: adding tasks — use plan_tasks to set the full graph upfront.
+
+    Args:
+        task_id: The id string of the task (as declared in plan_tasks).
+        status: One of "pending", "in_progress", or "done".
+
+    Note: starting a task whose dependencies aren't done will return an error.
+
+    Examples:
+        update_task("read", "in_progress")
+        update_task("read", "done")
+        update_task("impl", "in_progress")  # only valid after "read" is done
+    """
+    return tasks._tasks.update(task_id, status)
+
+
+@tool
+async def run_skill(name: str, request: str, context: str = "") -> str:
     """Execute a skill in a sub-agent with isolated context.
 
     Use when: the user's request matches a skill listed in the system prompt.
@@ -178,28 +254,33 @@ def run_skill(name: str, request: str, context: str = "") -> str:
         request: What the user wants to accomplish.
         context: Optional conversation context the sub-agent needs but can't see.
             Summarize relevant details from the conversation. Omit if the request is self-contained.
-
-    Examples:
-        run_skill("wenyan", "写一篇关于春天的散文")
-        run_skill("wenyan", "写一篇技术总结", context="项目使用 FastAPI + PostgreSQL，实现了用户认证模块")
     """
     body = skills._skill_manager.body(name)
     if body is None:
         available = ", ".join(skills._skill_manager.names()) or "(none)"
         return f"Skill '{name}' not found. Available: {available}"
 
-    import agent  # lazy import — same circular-dep pattern as task
-    with _sub_agent_scope(f"skill:{name}"):
-        sub_llm = agent._llm_base.bind_tools(agent.SUB_TOOLS)
-        user_msg = f"{request}\n\n## Context\n{context}" if context else request
-        history = [SystemMessage(content=body), HumanMessage(content=user_msg)]
-        print(f"\n  [skill: {name}]")
-        response = agent._run_loop(sub_llm, history, agent.SUB_TOOLS_BY_NAME, prefix="  ")
-    return response.content or "(completed, no summary)"
+    # Lazy imports: query_engine imports tools indirectly via tool lists, so
+    # importing it at module load would cycle. Same rationale as the previous
+    # lazy `import agent` pattern.
+    from mini_cc.engine.query_engine import get_engine
+    from mini_cc.engine.store import _triggering_asst_id
+
+    parent_id = _triggering_asst_id.get()
+    if parent_id is None:
+        return "Error: run_skill called outside a tool-dispatch context"
+
+    user_content = f"{request}\n\n## Context\n{context}" if context else request
+    return await get_engine().run_sidechain(
+        parent_id=parent_id,
+        system_prompt=body,
+        user_prompt=user_content,
+        label=f"skill:{name}",
+    )
 
 
 @tool
-def task(description: str) -> str:
+async def task(description: str) -> str:
     """Delegate a self-contained subtask to a sub-agent with fresh context.
 
     Use when: the subtask is independent and doesn't need the current conversation history.
@@ -207,15 +288,17 @@ def task(description: str) -> str:
 
     Args:
         description: Clear description of what the sub-agent should accomplish.
-
-    Examples:
-        task("Write a hello.py file and run it")
-        task("Find all TODO comments in the codebase and list them")
     """
-    import agent  # lazy import — agent imports tools, so we break the cycle here
-    with _sub_agent_scope(description):
-        sub_llm = agent._llm_base.bind_tools(agent.SUB_TOOLS)
-        history = [SystemMessage(content=prompts.SUB_SYSTEM_PROMPT), HumanMessage(content=description)]
-        print(f"\n  [sub-agent: {description}]")
-        response = agent._run_loop(sub_llm, history, agent.SUB_TOOLS_BY_NAME, prefix="  ")
-    return response.content or "(completed, no summary)"
+    from mini_cc.engine.query_engine import get_engine
+    from mini_cc.engine.store import _triggering_asst_id
+
+    parent_id = _triggering_asst_id.get()
+    if parent_id is None:
+        return "Error: task called outside a tool-dispatch context"
+
+    return await get_engine().run_sidechain(
+        parent_id=parent_id,
+        system_prompt=prompts.SUB_SYSTEM_PROMPT,
+        user_prompt=description,
+        label="task",
+    )
