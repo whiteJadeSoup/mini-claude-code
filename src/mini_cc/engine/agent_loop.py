@@ -36,6 +36,7 @@ from mini_cc.engine.messages import (
 )
 from mini_cc.engine.store import _triggering_asst_id
 from mini_cc.state import usage
+from mini_cc.tools.base import ToolOutput, get_tool
 
 
 class AgentLoop:
@@ -122,23 +123,33 @@ class AgentLoop:
                     None,
                 )
                 if tool_fn is None:
-                    result = (
+                    content = (
                         f"Error: unknown tool '{name}'. "
                         f"Available: {', '.join(self._tools)}"
                     )
+                    output = None
                 else:
                     token = _triggering_asst_id.set(
                         trigger.id if trigger else None
                     )
                     try:
-                        result = await tool_fn.ainvoke(tc["args"])
-                    except Exception as e:  # noqa: BLE001
-                        result = f"Error running {name}: {e}"
+                        # MiniTools: execute() never throws; validation errors
+                        # return a str via handle_validation_error callback.
+                        raw = await tool_fn.ainvoke(tc["args"])
                     finally:
                         _triggering_asst_id.reset(token)
 
+                    mini = get_tool(name)
+                    if mini is not None and isinstance(raw, ToolOutput):
+                        content = mini.to_api_content(raw)
+                        output = raw
+                    else:
+                        content = str(raw)
+                        output = None
+
                 yield ToolResultMessage(
-                    content=str(result),
+                    content=content,
+                    output=output,
                     tool_call_id=tc["id"],
                     parent_id=parent_id,
                     source=source,
