@@ -34,20 +34,26 @@ src/mini_cc/
 ├─ llm.py                   — LLM client setup + MAIN/SUB tool lists
 ├─ commands.py              — CommandRegistry, CommandContext, sync_skill_commands
 ├─ prompts.py               — build_system_prompt(), SUB_SYSTEM_PROMPT, COMPACT_PROMPT
-├─ engine/
+├─ skills.py                — SkillManager + _skill_manager singleton
+├─ engine/                  — core event loop (pure: no UI, no persistence)
 │  ├─ query_engine.py       — QueryEngine: dispatch, query, run_sidechain, compact
 │  ├─ agent_loop.py         — AgentLoop: per-turn LLM streaming + tool dispatch
-│  ├─ messages.py           — Pydantic message types
-│  └─ store.py              — MessageStore (api_view, adjacency, layer classification)
-├─ consumers/
-│  └─ persistence.py        — PersistenceConsumer, transcript_path()
-├─ state/
+│  ├─ messages.py           — Pydantic message types (Layer 1 API + Layer 2 UI)
+│  ├─ store.py              — MessageStore (api_view, adjacency, layer classification)
+│  ├─ subscription.py       — pub-sub consumer protocol
+│  ├─ predicates.py         — message classification predicates
+│  └─ transforms.py         — api_view construction helpers
+├─ consumers/               — engine subscribers (read events, produce side effects)
+│  ├─ persistence.py        — PersistenceConsumer, transcript_path()
+│  └─ tui/
+│     └─ app.py             — Textual TUI; renders chat, tool status, input
+├─ state/                   — mutable app state (swapped per sub-agent scope)
 │  ├─ tasks.py              — TaskManager + _tasks singleton (DAG-aware)
 │  ├─ todos.py              — TodoManager + _todos singleton
 │  └─ usage.py              — UsageTracker + _tracker
-└─ tools/
-   ├─ builtins.py           — all @tool functions, _sub_agent_scope
-   └─ skills.py             — SkillManager + _skill_manager singleton
+└─ tools/                   — tool definitions + MiniTool framework
+   ├─ base.py               — MiniTool ABC, ToolOutput hierarchy, registry
+   └─ builtins.py           — all 9 MiniTool implementations
 ```
 
 Data dirs (not Python): `skills/<name>/SKILL.md`, `prompts/`.
@@ -57,9 +63,9 @@ Data dirs (not Python): `skills/<name>/SKILL.md`, `prompts/`.
 - **`task` lazy import**: `task` in `tools/builtins.py` does `from mini_cc import llm` inside the function body to break the circular dep with `llm.py` importing tool lists.
 - **`todos._todos` / `tasks._tasks` / `usage._tracker` access**: all are reassigned (not just mutated) by `_sub_agent_scope` for sub-agent isolation. Always access as `module._name`, never via `from state.X import _name`.
 - **`load_dotenv()` ordering**: must run before any project imports that read env vars — see `llm.py` and `__main__.py`.
-- **Tool docstrings**: Google-style with "Use when / Don't use for" guidance and concrete examples.
+- **MiniTool framework**: tools subclass `MiniTool` in `tools/base.py`; `execute()` wraps `_run()` and catches all exceptions. `as_langchain_tool()` bridges to LangChain `StructuredTool`. Register with `register(XxxTool())` at module bottom.
 - **Skill system**: skills live in `skills/<name>/SKILL.md` with YAML frontmatter (`name`, `description`). Frontmatter is rescanned each turn. `run_skill` executes skills in a sub-agent (body as system prompt, never enters main history). Users invoke with `/skill-name <request>`.
-- **Module vs data dir naming**: `mini_cc.tools.skills` (Python module) and `./skills/` (data dir) share a name but live in different namespaces.
+- **Module vs data dir naming**: `mini_cc.skills` (Python module) and `./skills/` (data dir) share a name but live in different namespaces.
 
 ## Planning
 
