@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Annotated, Literal, Union
+from typing import Any, Annotated, Literal, Union
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
 from pydantic import BaseModel, Field
@@ -79,6 +79,7 @@ class ToolResultMessage(Message):
     type: Literal["tool_result"] = "tool_result"
     content: str
     tool_call_id: str
+    output: Any = None   # ToolOutput instance for UI; None when validation failed
 
 
 # --- Layer 2: UI Messages ---

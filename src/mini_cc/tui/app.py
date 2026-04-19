@@ -44,6 +44,7 @@ from mini_cc.engine.messages import (
     ToolUseBlock,
     UserMessage,
 )
+from mini_cc.tools.base import ToolOutput, get_tool
 from mini_cc.state import usage
 
 # Braille spinner for TurnFooter
@@ -79,8 +80,6 @@ _CI_PHRASES: list[tuple[str, str]] = [
     ("金风玉露一相逢",   "金风玉露一相逢便胜却人间无数"),
 ]
 
-_TOOL_ARGS_MAX = 60
-
 _LOGO = (
     "[grey50]  / \\__[/grey50]       [bold cyan]█▀▄▀█ █ █▄░█ █[/bold cyan] [dim]·[/dim] [bold cyan]█▀▀ █▀▀[/bold cyan]\n"
     "[grey50] (    @\\___[/grey50]   [bold cyan]█░▀░█ █ █░▀█ █▄▄  █▄▄ █▄▄[/bold cyan]\n"
@@ -100,16 +99,6 @@ def _shorten_cwd(path: str) -> str:
     if p.startswith(home.replace("\\", "/")):
         return "~" + p[len(home):]
     return p
-
-
-def _fmt_args(args: dict) -> str:
-    if not args:
-        return ""
-    first_key = next(iter(args))
-    flat = " ".join(str(args[first_key]).split())
-    if len(args) > 1:
-        flat = f"{flat}, …"
-    return flat[:_TOOL_ARGS_MAX - 1] + "…" if len(flat) > _TOOL_ARGS_MAX else flat
 
 
 # ---------------------------------------------------------------------------
@@ -236,14 +225,17 @@ class ToolStatus(Static):
         self,
         call_id: str,
         name: str,
-        args_repr: str,
+        args: dict,
         prefix: str,
         asst_id: str,
         parent_id: str | None,
     ) -> None:
+        mini = get_tool(name)
+        args_repr = mini.render_received(args) if mini else ""
         if parent_id is None:
             self._tools[call_id] = {
                 "name": name,
+                "args": args,
                 "args_repr": args_repr,
                 "prefix": prefix,
                 "asst_id": asst_id,
@@ -267,23 +259,36 @@ class ToolStatus(Static):
             g["tool_count"] += 1
             g["current_label"] = f"{name}({args_repr})"
 
-    def complete_tool(self, call_id: str) -> None:
+    def complete_tool(self, call_id: str, output=None) -> None:
         if call_id not in self._tools:
             return
         t = self._tools.pop(call_id)
         self._tool_order.remove(call_id)
         elapsed = time.monotonic() - t["started_at"]
+
+        mini = get_tool(t["name"])
+        is_err = isinstance(output, ToolOutput) and output.is_error
+        if mini is not None and isinstance(output, ToolOutput):
+            result_repr = (
+                mini.render_error(t["args"], output)
+                if is_err
+                else mini.render_complete(t["args"], output)
+            )
+        else:
+            result_repr = t["args_repr"]
+
+        color = "red" if is_err else "green"
         if call_id in self._groups:
             g = self._groups.pop(call_id)
             markup = (
-                f"{t['prefix']}[green]●[/green] "
-                f"[cyan]{t['name']}[/cyan]({t['args_repr']})"
+                f"{t['prefix']}[{color}]●[/{color}] "
+                f"[cyan]{t['name']}[/cyan]({result_repr})"
                 f" · {g['tool_count']} sub-tools · {elapsed:.1f}s"
             )
         else:
             markup = (
-                f"{t['prefix']}[green]●[/green] "
-                f"[cyan]{t['name']}[/cyan]({t['args_repr']})"
+                f"{t['prefix']}[{color}]●[/{color}] "
+                f"[cyan]{t['name']}[/cyan]({result_repr})"
             )
         self.post_message(ToolFlushed(markup))
 
@@ -295,9 +300,13 @@ class ToolStatus(Static):
         lines = []
         for cid in self._tool_order:
             t = self._tools[cid]
+            mini = get_tool(t["name"])
+            exec_repr = (
+                mini.render_executing(t["args"]) if mini else t["args_repr"]
+            )
             lines.append(
                 f"{t['prefix']}[grey50]{b}[/grey50] "
-                f"[cyan]{t['name']}[/cyan]({t['args_repr']})"
+                f"[cyan]{t['name']}[/cyan]({exec_repr})"
             )
             if cid in self._groups:
                 g = self._groups[cid]
@@ -552,7 +561,7 @@ class MiniCCApp(App):
                 tool_status.add_tool(
                     call_id=block.call_id,
                     name=block.name,
-                    args_repr=_fmt_args(block.args or {}),
+                    args=block.args or {},
                     prefix="  " if payload.parent_id else "",
                     asst_id=payload.id,
                     parent_id=payload.parent_id,
@@ -560,7 +569,7 @@ class MiniCCApp(App):
             self.query_one(StatusBar).refresh_status()
 
         elif isinstance(payload, ToolResultMessage):
-            tool_status.complete_tool(payload.tool_call_id)
+            tool_status.complete_tool(payload.tool_call_id, output=payload.output)
 
         elif isinstance(payload, UserMessage):
             if payload.is_synthetic:
