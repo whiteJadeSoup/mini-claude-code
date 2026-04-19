@@ -36,7 +36,9 @@ from mini_cc.engine.messages import (
 )
 from mini_cc.engine.store import _triggering_asst_id
 from mini_cc.state import usage
-from mini_cc.tools.base import ToolOutput, ToolErrorOutput, get_tool
+from mini_cc.tools.base import (
+    ToolErrorOutput, ToolOutput, get_tool, truncate_tool_content,
+)
 
 
 class AgentLoop:
@@ -147,6 +149,11 @@ class AgentLoop:
                         content = str(raw)
                         # validation error returns str; wrap so TUI shows red ●
                         output = ToolErrorOutput(message=content) if mini is not None else None
+
+                # Spill oversized content to disk before it enters the store;
+                # `output` keeps the full ToolOutput so the UI still renders
+                # the complete result.
+                content = truncate_tool_content(content, tc["id"])
 
                 yield ToolResultMessage(
                     content=content,
