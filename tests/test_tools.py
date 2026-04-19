@@ -10,6 +10,7 @@ from mini_cc.tools.base import (
     RunSkillOutput, SubTaskOutput,
     MiniTool, register, get_tool, _REGISTRY, output_from_dict,
 )
+import mini_cc.tools.builtins  # noqa: F401 — ensures all subclasses are registered
 from mini_cc.engine.messages import ToolResultMessage
 
 
@@ -149,13 +150,31 @@ class TestOutputTypeSerialization:
         assert reconstructed.replaced is False
         assert reconstructed.is_error is True
 
-    def test_output_from_dict_unknown_type_falls_back_to_base(self):
+    def test_output_from_dict_truly_unknown_type_falls_back_to_base(self):
+        # A type key that was never registered should gracefully fall back.
         reconstructed = output_from_dict({"type": "unknown_future_type", "is_error": False})
         assert isinstance(reconstructed, ToolOutput)
+        assert type(reconstructed) is ToolOutput  # not a subclass
 
     def test_output_from_dict_missing_type_falls_back_to_base(self):
         reconstructed = output_from_dict({"is_error": False})
         assert isinstance(reconstructed, ToolOutput)
+        assert type(reconstructed) is ToolOutput
+
+    def test_output_from_dict_base_sentinel_also_falls_back(self):
+        # "base" is the base class's own type value; it is intentionally
+        # excluded from _registry so it falls back to ToolOutput too.
+        reconstructed = output_from_dict({"type": "base", "is_error": False})
+        assert type(reconstructed) is ToolOutput
+
+    def test_all_concrete_subtypes_auto_registered(self):
+        # __init_subclass__ must have registered exactly the 10 concrete types.
+        expected = {
+            "error", "command", "file_write", "file_edit",
+            "todo_plan", "todo_update", "task_plan", "task_update",
+            "run_skill", "sub_task",
+        }
+        assert set(ToolOutput._registry.keys()) == expected
 
 
 # ---------------------------------------------------------------------------
