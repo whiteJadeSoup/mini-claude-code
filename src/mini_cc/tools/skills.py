@@ -2,7 +2,7 @@ import re
 import yaml
 from pathlib import Path
 
-from config import CWD
+from mini_cc.config import CWD
 
 
 class SkillManager:

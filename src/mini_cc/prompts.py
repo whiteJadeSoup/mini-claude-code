@@ -1,6 +1,6 @@
 """Centralized prompt templates for the agent."""
 
-import config
+from mini_cc import config
 
 
 def _platform_line() -> str:

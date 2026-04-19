@@ -1,7 +1,7 @@
 """Unit tests for tasks.py — TaskManager, DAG validation, status transitions, persistence."""
 import pytest
 from pathlib import Path
-from tasks import TaskManager, TaskStatus
+from mini_cc.state.tasks import TaskManager, TaskStatus
 
 
 # ---------------------------------------------------------------------------

@@ -19,7 +19,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-import config
+from mini_cc import config
 
 
 class TaskStatus(str, Enum):
