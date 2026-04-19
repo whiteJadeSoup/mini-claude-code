@@ -477,7 +477,7 @@ class MiniCCApp(App):
         from mini_cc.consumers import persistence
         from mini_cc.consumers.persistence import PersistenceConsumer
         from mini_cc.engine.query_engine import QueryEngine, set_engine
-        from mini_cc.tools.skills import _skill_manager
+        from mini_cc.skills import _skill_manager
 
         engine = QueryEngine(
             llm_base=agent._llm_base,
@@ -638,7 +638,7 @@ class MiniCCApp(App):
     @work(exclusive=True)
     async def _run_turn(self, text: str) -> None:
         from mini_cc import commands
-        from mini_cc.tools.skills import _skill_manager
+        from mini_cc.skills import _skill_manager
 
         try:
             await self._engine.refresh_skills()
