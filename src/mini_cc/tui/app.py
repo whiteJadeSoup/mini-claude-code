@@ -394,8 +394,20 @@ class StatusBar(Static):
 
     def refresh_status(self) -> None:
         tracker = usage._tracker
-        ctx_used = tracker.context_tokens_used()
         ctx_max = tracker.context_limit or 0
+
+        # Ask the engine for current occupancy — it combines record-accurate
+        # baseline with a char-based estimate so new tool_results landing
+        # between LLM calls are reflected immediately. `~` prefix signals
+        # the number is fully inferred (no real API record yet).
+        from mini_cc.engine.query_engine import get_engine
+        try:
+            engine = get_engine()
+            ctx_used = engine.current_context_tokens(parent_id=None)
+        except Exception:  # noqa: BLE001
+            ctx_used = tracker.context_tokens_used()
+        estimate_prefix = "~" if not tracker._records and ctx_used > 0 else ""
+
         pct = (ctx_used / ctx_max * 100) if ctx_max else 0
         if pct >= 80:
             ctx_color = "red"
@@ -410,7 +422,8 @@ class StatusBar(Static):
 
         self.update(
             f"[dim]▸ {self._model or 'unknown'}[/dim]  ·  "
-            f"[{ctx_color}]ctx {_fmt_tokens(ctx_used)} / {ctx_max_s} ({pct:.0f}%)[/{ctx_color}]  ·  "
+            f"[{ctx_color}]ctx {estimate_prefix}{_fmt_tokens(ctx_used)} / {ctx_max_s} "
+            f"({estimate_prefix}{pct:.0f}%)[/{ctx_color}]  ·  "
             f"[dim]{cwd_display}[/dim]  ·  "
             f"[dim]↑ {_fmt_tokens(out_total)}[/dim]"
         )

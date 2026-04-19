@@ -22,13 +22,15 @@ Why engine owns the store:
 """
 from __future__ import annotations
 
+import re
 import sys
 import uuid
 from collections.abc import Callable
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_core.tools import BaseTool
+from pydantic import BaseModel
 
 from mini_cc import prompts
 from mini_cc.engine.agent_loop import AgentLoop
@@ -301,6 +303,8 @@ class QueryEngine:
 
     # -- compact ------------------------------------------------------------
 
+    _MAX_COMPACT_ATTEMPTS = 3  # K in the plan — retry budget for overflow recovery
+
     async def compact(self, custom_instructions: str = "", auto: bool = False) -> int:
         """Summarize, clear Layer 1, and re-seed with system + boundary + summary.
 
@@ -308,6 +312,12 @@ class QueryEngine:
         turn — its messages reach consumers via _dispatch directly. This
         matches the semantics of `/compact` (callers want a return value,
         not an iterator).
+
+        Overflow handling: the compact call itself can exceed the context
+        window when the history is large. We split the history into
+        ApiRounds, drop the oldest until it fits, and retry up to
+        _MAX_COMPACT_ATTEMPTS times, using the provider's error message
+        to compute the next drop size (DeepSeek gap / 20% fallback).
         """
         from mini_cc.tools.builtins import _sub_agent_scope
 
@@ -325,30 +335,84 @@ class QueryEngine:
         )
         pre_count = len(self.store.all())
 
-        langchain_msgs = self.store.api_view(parent_id=None)
+        all_msgs = self.store.api_view(parent_id=None)
         # Skip the SystemMessage (index 0) — compact prompt has its own.
-        formatted = _format_history_for_summary(langchain_msgs[1:])
-        if custom_instructions:
-            formatted += f"\n\n## Compact Instructions\n{custom_instructions}"
+        history = all_msgs[1:]
+        groups = _group_by_api_round(history)
+        original_chars = sum(g.size_chars for g in groups)
 
-        usage._tracker.reset()
+        # Budget for the compact call's HumanMessage payload.
+        # context_limit includes completion reserve, so subtract reserves
+        # for the summary output and one round of API overhead; subtract
+        # COMPACT_PROMPT which rides along as the system message.
+        budget_chars = (
+            usage._tracker.context_limit
+            - self._COMPACT_SUMMARY_RESERVE
+            - self._API_ROUND_RESERVE
+            - len(prompts.COMPACT_PROMPT)
+        ) * 2
+
+        response = None
+        attempt = 0
+        extra_chars = 0
+        dropped = 0
+        marker_needed = False
+        kept: list[ApiRound] = []
+        formatted = ""
+        sent_chars = 0
+
         with _sub_agent_scope("compact"):
-            response = await self._llm_base.ainvoke(
-                [
-                    SystemMessage(content=prompts.COMPACT_PROMPT),
-                    HumanMessage(content=formatted),
-                ]
-            )
-            usage._tracker.record(
-                "compact",
-                response.usage_metadata,
-                getattr(response, "response_metadata", None),
-            )
+            while True:
+                kept, dropped, marker_needed = _plan_kept_groups(
+                    groups, budget_chars, extra_chars_to_shed=extra_chars
+                )
+
+                messages_to_send: list[BaseMessage] = []
+                if marker_needed:
+                    messages_to_send.append(HumanMessage(content=MARKER_TEXT))
+                for g in kept:
+                    messages_to_send.extend(g.messages)
+
+                formatted = _format_history_for_summary(messages_to_send)
+                if custom_instructions:
+                    formatted += f"\n\n## Compact Instructions\n{custom_instructions}"
+                sent_chars = len(formatted)
+
+                try:
+                    response = await self._llm_base.ainvoke(
+                        [
+                            SystemMessage(content=prompts.COMPACT_PROMPT),
+                            HumanMessage(content=formatted),
+                        ]
+                    )
+                    usage._tracker.record(
+                        "compact",
+                        response.usage_metadata,
+                        getattr(response, "response_metadata", None),
+                    )
+                    break
+                except Exception as e:  # noqa: BLE001
+                    if not _is_context_exceeded(e):
+                        raise
+                    attempt += 1
+                    if attempt >= self._MAX_COMPACT_ATTEMPTS:
+                        raise
+                    # Single-round overflow — more drops can't help (H2).
+                    if len(kept) <= 1:
+                        raise
+                    extra_chars += _chars_to_shed_on_retry(
+                        str(e), usage._tracker.context_limit
+                    )
 
         summary = _extract_summary(response.content)
         body = _build_compact_body(summary, auto=auto)
         if task_state := tasks._tasks.state_summary():
             body += f"\n\n---\n\nActive tasks at time of compaction:\n{task_state}"
+
+        # Reset tracker AFTER the compact call succeeds. If it had raised,
+        # the tracker keeps its last good record so the UI doesn't flip
+        # to "0 / 128k — no LLM calls yet" mid-session.
+        usage._tracker.reset()
 
         self.store.clear_layer_1()
         if system_msg is not None:
@@ -357,7 +421,17 @@ class QueryEngine:
             self.store._messages.insert(0, system_msg)
 
         await self._dispatch(
-            CompactBoundaryMessage(pre_count=pre_count, auto=auto, source="compact")
+            CompactBoundaryMessage(
+                pre_count=pre_count,
+                auto=auto,
+                dropped_rounds=dropped,
+                retained_rounds=len(kept),
+                marker_used=marker_needed,
+                attempts=attempt + 1,
+                original_chars=original_chars,
+                sent_chars=sent_chars,
+                source="compact",
+            )
         )
         await self._dispatch(
             UserMessage(content=body, is_synthetic=True, source="compact")
@@ -470,12 +544,33 @@ class QueryEngine:
 
         Catches the gap where a large tool result was added after the last
         LLM call — projected_next_input() won't see those tokens yet.
-        Uses // 2 (not // 3) because code, JSON, and Chinese text run closer
-        to 1-2 chars/token; underestimating here causes missed compacts.
+        Uses the shared _estimate_message_chars so tool_call args (which
+        don't live in `content`) are counted; missing them lets `Edit`-style
+        calls with large `new_string` args slip past this check.
         """
-        estimated = sum(len(str(getattr(m, "content", ""))) for m in messages) // 2
+        estimated = sum(_estimate_message_chars(m) for m in messages) // 2
         headroom = self._COMPACT_SUMMARY_RESERVE + self._API_ROUND_RESERVE + self._COMPACT_CALL_RESERVE
         return estimated + headroom > usage._tracker.context_limit
+
+    def current_context_tokens(self, parent_id: str | None = None) -> int:
+        """Tokens currently held in history — what the next LLM call will send.
+
+        Two signals, whichever is larger:
+          1. `last_input + last_output` — API-accurate baseline right after a
+             call completes. Stale as soon as any new content lands in the
+             store (tool_result, next user message, compact summary).
+          2. char-based estimate of the current api_view — catches content
+             added since the last LLM response, which signal 1 is blind to.
+
+        Context occupancy should never under-report. Taking the max keeps the
+        footer honest when the real value lies between the two.
+        """
+        messages = self.store.api_view(parent_id=parent_id)
+        char_est = sum(_estimate_message_chars(m) for m in messages) // 2
+        if usage._tracker._records:
+            r = usage._tracker._records[-1]
+            return max(r.input + r.output, char_est)
+        return char_est
 
 
 # ---------------------------------------------------------------------------
@@ -549,3 +644,186 @@ def _build_compact_body(summary: str, auto: bool) -> str:
         f"transcript at: {path}"
         f"{tail}"
     )
+
+
+# ---------------------------------------------------------------------------
+# API-round trimming for compact input
+# ---------------------------------------------------------------------------
+#
+# compact() summarises the conversation by sending a large HumanMessage to
+# the LLM. When history is big enough to need compacting, the full formatted
+# string can itself exceed the context window. These helpers split the
+# history into "API rounds" (an AIMessage + its tool_results + trailing
+# user follow-ups), trim from the head until the input fits the budget, and
+# prefix a MARKER when the original first user turn has been dropped.
+#
+# Invariants enforced by _plan_kept_groups:
+#   H1 — drop at least 1 round when len(groups) >= 2.
+#   H2 — keep at least 1 round always.
+
+
+MARKER_TEXT = (
+    "[System-inserted MARKER — not from the real user. "
+    "Earlier parts of this conversation were truncated because the history "
+    "exceeded the compact window. The first real user/assistant turns below "
+    "are not the original start of the conversation; treat them as the new "
+    "starting point for your summary.]"
+)
+
+
+def _estimate_message_chars(m: BaseMessage) -> int:
+    """Char-count estimate matching what _format_history_for_summary renders.
+
+    Includes tool_call args (which don't live in `content`) because in
+    agentic workflows they're often the single largest payload — missing
+    them makes budget checks optimistic by orders of magnitude.
+    """
+    import json as _json
+
+    total = len(str(getattr(m, "content", "")))
+    for tc in (getattr(m, "tool_calls", None) or []):
+        total += len(tc.get("name", ""))
+        total += len(_json.dumps(tc.get("args", {}), ensure_ascii=False))
+    # Per-message formatting prefix ("Human: ", "Assistant: ", "  → ")
+    # — 16 chars is a generous upper bound covering all cases.
+    total += 16
+    return total
+
+
+class ApiRound(BaseModel):
+    """One logical turn in the conversation.
+
+    An AIMessage plus the ToolMessages and any HumanMessages that follow
+    it, up to (but not including) the next AIMessage. The first group —
+    everything before any AIMessage — is the "preamble" and holds the
+    original opening user message(s).
+
+    Why this shape: compact drops whole rounds rather than individual
+    messages, so orphan ToolMessages (without the AIMessage whose
+    tool_calls they answer) can never appear after trimming.
+    """
+
+    messages: list[BaseMessage]
+    is_preamble: bool
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    @property
+    def size_chars(self) -> int:
+        return sum(_estimate_message_chars(m) for m in self.messages)
+
+
+def _group_by_api_round(messages: list[BaseMessage]) -> list[ApiRound]:
+    """Split a LangChain message list into API rounds.
+
+    api_view() already merges consecutive AssistantMessages by turn_id,
+    so each AIMessage in the input represents exactly one assistant
+    round. That makes the boundary trivial: any AIMessage after a
+    non-empty `current` buffer flushes the buffer as a round.
+    """
+    groups: list[ApiRound] = []
+    current: list[BaseMessage] = []
+
+    def _flush() -> None:
+        if not current:
+            return
+        is_preamble = not any(isinstance(x, AIMessage) for x in current)
+        groups.append(ApiRound(messages=list(current), is_preamble=is_preamble))
+        current.clear()
+
+    for m in messages:
+        if isinstance(m, AIMessage) and current:
+            _flush()
+        current.append(m)
+    _flush()
+    return groups
+
+
+def _plan_kept_groups(
+    groups: list[ApiRound],
+    budget_chars: int,
+    extra_chars_to_shed: int = 0,
+) -> tuple[list[ApiRound], int, bool]:
+    """Decide which API rounds survive into the compact input.
+
+    Hard invariants (product requirements):
+      H1 — drop at least 1 round when len(groups) >= 2. compact is a
+           reduction operation; dropping 0 defeats the purpose.
+      H2 — keep at least 1 round always. With 0 rounds there is nothing
+           to summarise; the session would silently lose all history.
+
+    On retry, the caller passes `extra_chars_to_shed` > 0 to force more
+    drops. The value is treated as a tightening of the effective budget.
+
+    Returns:
+        (kept, dropped_count, marker_needed)
+        `marker_needed` is True iff at least one round was dropped AND
+        the original groups[0] (the preamble) is no longer in `kept`.
+    """
+    if not groups:
+        return ([], 0, False)
+
+    marker_budget = len(MARKER_TEXT) + 32
+    effective_budget = budget_chars - extra_chars_to_shed - marker_budget
+
+    kept = list(groups)
+    dropped = 0
+
+    # H1: drop at least 1 when we have room (single-group case falls to H2).
+    if len(kept) > 1:
+        kept.pop(0)
+        dropped += 1
+
+    # Keep dropping from the head until we fit, or only 1 round remains (H2).
+    while len(kept) > 1 and sum(g.size_chars for g in kept) > effective_budget:
+        kept.pop(0)
+        dropped += 1
+
+    marker_needed = dropped > 0 and (not kept or kept[0] is not groups[0])
+    return (kept, dropped, marker_needed)
+
+
+_GAP_PATTERN = re.compile(
+    r"maximum context length is (\d+) tokens.*?requested (\d+) tokens",
+    re.DOTALL,
+)
+
+
+def _parse_context_gap_tokens(error_msg: str) -> int | None:
+    """Parse a DeepSeek/OpenAI-compat context-exceeded error for the gap.
+
+    Returns (requested - limit) in tokens when the message matches the
+    expected pattern, else None. Anthropic and other providers use a
+    different format — the caller should fall back to a percentage-based
+    heuristic for those.
+    """
+    m = _GAP_PATTERN.search(error_msg)
+    if not m:
+        return None
+    limit, requested = int(m.group(1)), int(m.group(2))
+    return max(0, requested - limit)
+
+
+# Tokens of safety margin added on top of the parsed gap on each retry.
+# Large enough to cover estimator drift; small enough to not overshoot.
+_RETRY_SAFETY_MARGIN_TOKENS = 5_000
+# When the error format is unknown, shed this fraction of the context
+# window per retry. Two retries shed ~40% combined — enough for any
+# model even when we can't read its error message.
+_RETRY_FALLBACK_FRACTION = 0.20
+
+
+def _chars_to_shed_on_retry(error_msg: str, context_limit_tokens: int) -> int:
+    """How many additional characters to drop before the next compact try.
+
+    If the error message carries a parseable gap (DeepSeek path), target
+    `gap + safety_margin` tokens. Otherwise fall back to a fixed fraction
+    of the context window. Result is returned in chars (x2 the tokens)
+    so it plugs directly into the char-based budget.
+    """
+    gap = _parse_context_gap_tokens(error_msg)
+    if gap is not None:
+        target_tokens = gap + _RETRY_SAFETY_MARGIN_TOKENS
+    else:
+        target_tokens = int(context_limit_tokens * _RETRY_FALLBACK_FRACTION)
+    return target_tokens * 2

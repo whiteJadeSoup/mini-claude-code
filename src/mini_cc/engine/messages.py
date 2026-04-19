@@ -87,6 +87,14 @@ class CompactBoundaryMessage(Message):
     type: Literal["compact_boundary"] = "compact_boundary"
     pre_count: int
     auto: bool
+    # Audit metadata populated by compact(). Defaults keep older JSONL
+    # records deserializable after this change.
+    dropped_rounds: int = 0
+    retained_rounds: int = 0
+    marker_used: bool = False
+    attempts: int = 1
+    original_chars: int = 0
+    sent_chars: int = 0
 
 
 class StatusMessage(Message):
