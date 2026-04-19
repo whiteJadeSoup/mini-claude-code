@@ -119,20 +119,28 @@ class UsageTracker:
     def set_limit(self, limit: int):
         self._context_limit = limit
 
-    def summary(self, history_len: int, console: Console | None = None) -> None:
+    def summary(
+        self,
+        history_len: int,
+        console: Console | None = None,
+        current_tokens: int | None = None,
+    ) -> None:
         """Render /context output using rich.
 
-        Context % is based on the last call's input tokens — that's the
-        actual context window consumption, since every call sends full history.
-        Pass a custom console to capture output (e.g. StringIO-backed Console).
+        Context % reflects CURRENT occupancy (what the next call will send),
+        not just the last call's input. Caller passes `current_tokens` — the
+        engine computes this as max(last_input + last_output, char_estimate)
+        so tool_results landing between LLM calls are reflected. If omitted
+        (e.g. tests calling summary without an engine), falls back to the
+        last input count.
         """
         c = console or _console
-        last_input = self.context_tokens_used()
-        pct = last_input / self._context_limit * 100 if self._context_limit else 0
+        ctx_used = current_tokens if current_tokens is not None else self.context_tokens_used()
+        pct = ctx_used / self._context_limit * 100 if self._context_limit else 0
         color = "green" if pct < 50 else "yellow" if pct < 80 else "red"
 
         c.print(f"[bold]Model:[/]    {self._model or 'unknown'}")
-        c.print(f"[bold]Context:[/]  [{color}]{last_input:,} / {self._context_limit:,} ({pct:.1f}%)[/]")
+        c.print(f"[bold]Context:[/]  [{color}]{ctx_used:,} / {self._context_limit:,} ({pct:.1f}%)[/]")
         c.print(f"[bold]History:[/]  {history_len} messages")
 
         if not self._records:
