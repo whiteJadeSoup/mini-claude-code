@@ -1,7 +1,7 @@
 """MiniTool base framework: structured Output types, render protocol, registry."""
 import inspect
 from abc import ABC, abstractmethod
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ValidationError, model_validator
 from langchain_core.tools import StructuredTool
@@ -12,8 +12,22 @@ from langchain_core.tools import StructuredTool
 # ---------------------------------------------------------------------------
 
 class ToolOutput(BaseModel):
+    # "base" is this class's own sentinel; __init_subclass__ skips it so the
+    # base class is never auto-registered — output_from_dict falls back to it
+    # for unknown/missing type keys, which is the correct behavior.
     type: str = "base"
     is_error: bool = False
+    _registry: ClassVar[dict[str, Any]] = {}
+
+    @classmethod
+    def __pydantic_init_subclass__(cls, **kw: Any) -> None:
+        # __pydantic_init_subclass__ fires after Pydantic's metaclass has fully
+        # processed the subclass — cls.model_fields already reflects the override.
+        # Plain __init_subclass__ fires too early: it sees the parent's type field.
+        super().__pydantic_init_subclass__(**kw)
+        field = cls.model_fields.get("type")
+        if field is not None and field.default and field.default != "base":
+            ToolOutput._registry[field.default] = cls
 
     def to_api_str(self) -> str:
         return self.model_dump_json()
@@ -122,27 +136,13 @@ class SubTaskOutput(ToolOutput):
         return self.result
 
 
-# ---------------------------------------------------------------------------
-# Output deserialization registry — maps type string → concrete class
-# ---------------------------------------------------------------------------
-
-_OUTPUT_TYPES: dict[str, type[ToolOutput]] = {
-    "error":       ToolErrorOutput,
-    "command":     CommandOutput,
-    "file_write":  FileWriteOutput,
-    "file_edit":   FileEditOutput,
-    "todo_plan":   TodoPlanOutput,
-    "todo_update": TodoUpdateOutput,
-    "task_plan":   TaskPlanOutput,
-    "task_update": TaskUpdateOutput,
-    "run_skill":   RunSkillOutput,
-    "sub_task":    SubTaskOutput,
-}
-
-
 def output_from_dict(d: dict) -> ToolOutput:
-    """Reconstruct the correct ToolOutput subclass from a serialized dict."""
-    cls = _OUTPUT_TYPES.get(d.get("type", ""), ToolOutput)
+    """Reconstruct the correct ToolOutput subclass from a serialized dict.
+
+    Subclasses self-register via __init_subclass__ when the module is imported.
+    Unknown or missing type keys fall back to the ToolOutput base class.
+    """
+    cls = ToolOutput._registry.get(d.get("type", ""), ToolOutput)
     return cls.model_validate(d)
 
 
