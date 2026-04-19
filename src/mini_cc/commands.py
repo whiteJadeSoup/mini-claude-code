@@ -6,7 +6,7 @@ from typing import Any
 from pydantic import BaseModel, SkipValidation
 
 from mini_cc.state.usage import UsageTracker
-from mini_cc.tools import skills
+from mini_cc import skills
 
 
 class CommandContext(BaseModel):

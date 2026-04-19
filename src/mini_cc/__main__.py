@@ -34,7 +34,7 @@ def main() -> None:
     import mini_cc.commands               # noqa: F401 — command registry
     import mini_cc.consumers.persistence  # noqa: F401 — transcript writer
     import mini_cc.engine.query_engine    # noqa: F401 — engine + agent loop
-    from mini_cc.tui.app import MiniCCApp
+    from mini_cc.consumers.tui.app import MiniCCApp
     MiniCCApp().run()
 
 

@@ -6,7 +6,7 @@ from mini_cc.state import tasks, todos, usage
 from mini_cc.state.tasks import TaskManager
 from mini_cc.state.todos import TodoManager
 from mini_cc.state.usage import UsageTracker
-from mini_cc.tools import skills
+from mini_cc import skills
 from mini_cc.tools.base import (
     MiniTool, ToolOutput,
     CommandOutput, FileWriteOutput, FileEditOutput,
