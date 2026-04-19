@@ -40,6 +40,17 @@ def transcript_path() -> Path:
     return path
 
 
+def tool_result_path(tool_call_id: str) -> Path:
+    """Landing path for the full content of an oversized tool result.
+
+    Co-located with the session's transcript so an offline reader can pair
+    a truncated ToolResultMessage with its full payload. The model can
+    also re-read this path via the Read tool if the in-context preview
+    isn't enough to act on.
+    """
+    return transcript_path().parent / "tool_results" / f"{tool_call_id}.txt"
+
+
 def _on_append(msg: Message) -> None:
     """Sync JSONL writer. Module-level so tests can call it without an event loop."""
     try:
