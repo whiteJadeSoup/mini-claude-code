@@ -1,28 +1,25 @@
 """Token accounting for LLM calls and projected next-call input.
 
-UsageTracker is the single source of truth for three questions:
-  1. What did the API bill us for? (per-call records + session totals)
-  2. How much is in context right now? (i.e. what will the next API call
-     send — includes already-billed history + anything appended since)
-  3. Is there enough headroom for one more round + compact?
+UsageTracker records what the API bills us for on every response. The
+forward-looking question — "how many tokens will the NEXT call send?" —
+is answered on demand by context_tokens_used(messages): the last
+API-reported baseline (input + output) plus a char-based local estimate
+of any Layer-1 messages dispatched after that response and not yet
+rebaselined.
 
-The "right now" number is maintained incrementally via note_message /
-note_content_cleared, called by engine._dispatch and _clear_old_tool_results
-respectively. That keeps context_tokens_used() O(1) and lets callers
-(`/context`, TUI status bar, _should_auto_compact) read a single authority
-without passing messages around.
+This mirrors the industry pattern (OpenCode / Kilo Code / Roo-Code /
+Gemini CLI): trust the API for what it has seen; estimate only the
+pending delta. No hooks threaded through _dispatch, no running state to
+keep in sync with the store.
 """
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
 
+from langchain_core.messages import AIMessage, BaseMessage
 from pydantic import BaseModel
 from rich.table import Table
 from rich.console import Console
-
-if TYPE_CHECKING:
-    from mini_cc.engine.messages import Message
 
 
 _console = Console()
@@ -93,16 +90,6 @@ class UsageTracker:
         self._total_cache: int = 0
         self._total_reasoning: int = 0
         self._streaming_out: int = 0  # chunk proxy during active streaming
-        # Running delta: chars appended to api_view since the last
-        # AssistantMessage (i.e. since the last API response). Updated by
-        # note_message on every dispatch. Used by context_tokens_used() to
-        # answer in O(1) without walking the store.
-        self._chars_since_last_ai: int = 0
-        # Chars removed in-place by _clear_old_tool_results since the last
-        # record(). Those chars are still counted in last.input (API saw
-        # them), but won't be in the next call's input, so we subtract them
-        # from the baseline.
-        self._cleared_chars_since_record: int = 0
 
     def count_stream_chunk(self) -> None:
         """Increment the live output-token proxy by one streaming chunk."""
@@ -130,53 +117,10 @@ class UsageTracker:
         self._streaming_out = 0  # exact value now in _total_out
         self._total_cache += rec.cache_read
         self._total_reasoning += rec.reasoning
-        # A fresh record means last.input + last.output is the new baseline;
-        # anything the delta was tracking has been folded into last.output
-        # (the LLM's response) by definition.
-        self._chars_since_last_ai = 0
-        self._cleared_chars_since_record = 0
         if response_metadata and (model := response_metadata.get("model_name")):
             self._model = model
             if model in self.MODEL_LIMITS:
                 self._context_limit = self.MODEL_LIMITS[model]
-
-    def note_message(self, msg: "Message") -> None:
-        """Hook called by engine._dispatch for every stored message.
-
-        Maintains _chars_since_last_ai so context_tokens_used() stays
-        accurate between record() calls. Four cases:
-
-        - AssistantMessage → reset delta to 0. The response that this
-          represents is the API-billed last.output; subsequent messages
-          accumulate fresh.
-        - SystemPromptMessage / UserMessage / ToolResultMessage → append
-          to delta. These are Layer-1, part of the next API input.
-        - Layer-2 (StatusMessage / CompactBoundaryMessage) or unknown →
-          ignore; they are not sent to the API.
-        """
-        # Lazy import: mini_cc.engine.messages pulls langchain + pydantic
-        # and creates a cycle at module load time.
-        from mini_cc.engine.messages import (
-            AssistantMessage,
-            SystemPromptMessage,
-            ToolResultMessage,
-            UserMessage,
-        )
-        if isinstance(msg, AssistantMessage):
-            self._chars_since_last_ai = 0
-        elif isinstance(msg, (SystemPromptMessage, UserMessage, ToolResultMessage)):
-            self._chars_since_last_ai += estimate_chars(msg)
-
-    def note_content_cleared(self, old_chars: int, new_chars: int) -> None:
-        """Hook for _clear_old_tool_results' in-place content mutation.
-
-        Without this, old tool_result chars remain counted in last.input
-        even though the next API call won't include them — causing
-        context_tokens_used() to over-report (and compact to fire
-        unnecessarily) right after a clear.
-        """
-        dropped = max(0, old_chars - new_chars)
-        self._cleared_chars_since_record += dropped
 
     def merge_sub(self, description: str, sub: "UsageTracker"):
         """Collapse a sub-agent's records into one summary row."""
@@ -198,23 +142,33 @@ class UsageTracker:
     def context_limit(self) -> int:
         return self._context_limit
 
-    def context_tokens_used(self) -> int:
+    def context_tokens_used(self, messages: list[BaseMessage]) -> int:
         """Tokens currently in context = what the next API call will send.
 
-        Pre-first-record (boot, post-compact-reset): delta alone, since
-        nothing has been billed yet. Post-first-record: billed baseline
-        (last.input + last.output) minus any cleared chars, plus the
-        running delta. Clamped at 0 in case clearing outpaces baseline
-        due to estimate drift.
+        Pre-first-record (boot, post-compact-reset): full-history char
+        estimate, since no API baseline exists yet.
+
+        Post-first-record: last.input + last.output (API-billed baseline)
+        plus char-estimate of messages appended AFTER the last AI response
+        — these are the tool_results / new user turn that the most recent
+        record() hasn't counted yet. They'll be folded into the next
+        response's input_tokens; until then, we estimate locally.
         """
         if not self._records:
-            return self._chars_since_last_ai // 2
+            return sum(estimate_chars(m) for m in messages) // 2
         last = self._records[-1]
-        baseline = last.input + last.output - self._cleared_chars_since_record // 2
-        return max(0, baseline) + self._chars_since_last_ai // 2
+        # Walk from the end backwards; stop at the most recent AIMessage.
+        # That AI (and everything before it) is covered by last.input +
+        # last.output.
+        new_chars = 0
+        for m in reversed(messages):
+            if isinstance(m, AIMessage):
+                break
+            new_chars += estimate_chars(m)
+        return last.input + last.output + new_chars // 2
 
-    def headroom_left(self) -> int:
-        return self._context_limit - self.context_tokens_used()
+    def headroom_left(self, messages: list[BaseMessage]) -> int:
+        return self._context_limit - self.context_tokens_used(messages)
 
     def input_tokens_used(self) -> int:
         return self._total_in
@@ -225,8 +179,6 @@ class UsageTracker:
     def reset(self):
         """Clear per-call records after a compact. Preserves session totals."""
         self._records.clear()
-        self._chars_since_last_ai = 0
-        self._cleared_chars_since_record = 0
 
     def set_limit(self, limit: int):
         self._context_limit = limit
@@ -235,14 +187,21 @@ class UsageTracker:
         self,
         history_len: int,
         console: Console | None = None,
+        current_tokens: int | None = None,
     ) -> None:
         """Render /context output using rich.
 
-        Context % reflects CURRENT occupancy (what the next call will send)
-        via context_tokens_used() — same number the TUI status bar reads.
+        `current_tokens` is the occupancy number from
+        `context_tokens_used(messages)`. Caller computes it (e.g. via
+        engine.current_context_tokens()) and passes it in — this class
+        doesn't hold a MessageStore reference, so it can't derive the
+        number itself. If omitted, falls back to the last API input count
+        so tests exercising summary() without an engine still render.
         """
         c = console or _console
-        ctx_used = self.context_tokens_used()
+        ctx_used = current_tokens if current_tokens is not None else (
+            self._records[-1].input if self._records else 0
+        )
         pct = ctx_used / self._context_limit * 100 if self._context_limit else 0
         color = "green" if pct < 50 else "yellow" if pct < 80 else "red"
 

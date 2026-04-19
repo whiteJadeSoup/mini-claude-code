@@ -64,7 +64,11 @@ async def cmd_context(args, ctx):
     from rich.console import Console
     buf = StringIO()
     c = Console(file=buf, width=100, no_color=True, highlight=False)
-    ctx.tracker.summary(len(ctx.engine.store.all()), console=c)
+    ctx.tracker.summary(
+        len(ctx.engine.store.all()),
+        console=c,
+        current_tokens=ctx.engine.current_context_tokens(),
+    )
     ctx.notify(buf.getvalue().strip())
 
 

@@ -155,10 +155,6 @@ class QueryEngine:
         exceptions are isolated inside ``Subscription.deliver``.
         """
         self.store.append(msg)
-        # Keep usage tracker's running delta in sync with the store so
-        # context_tokens_used() reflects tool_results / user msgs the moment
-        # they land, not only after the next LLM response.
-        usage._tracker.note_message(msg)
         for sub in self._subscriptions:
             try:
                 if not sub.filter(msg):
@@ -422,12 +418,10 @@ class QueryEngine:
         if system_msg is not None:
             # Direct insert: consumers already saw this message at boot.
             # Re-dispatching would duplicate JSONL + re-render in UI.
+            # Tracker doesn't need a separate notify — context_tokens_used
+            # reads the store on demand and will pick up the re-inserted
+            # SystemPromptMessage next time it's called.
             self.store._messages.insert(0, system_msg)
-            # Tracker was reset above — tell it about the re-inserted system
-            # prompt so the first post-compact context_tokens_used() reading
-            # (before any record()) still counts the prompt that will be in
-            # the next API call.
-            usage._tracker.note_message(system_msg)
 
         await self._dispatch(
             CompactBoundaryMessage(
@@ -488,20 +482,23 @@ class QueryEngine:
     ) -> list[BaseMessage]:
         """Called by AgentLoop before each LLM request.
 
-        Compact if the tracker reports we're inside the reserved headroom.
-        Tracker accounting covers both the last API-billed input/output and
-        any Layer-1 messages appended since (tool_results, new user msgs),
-        so a single check replaces the old "token OR char-estimate" pair.
+        Runs _clear_old_tool_results to free space, then asks the tracker
+        whether we have enough headroom for one more round + compact. The
+        tracker's answer is API-baseline + a char estimate of messages
+        added since the last API response (mostly tool_results from the
+        current turn) — see UsageTracker.context_tokens_used.
         """
         self._clear_old_tool_results(parent_id)
+        messages = self.store.api_view(parent_id=parent_id)
 
-        if self._should_auto_compact():
+        if self._should_auto_compact(messages):
             try:
                 await self.compact(auto=True)
+                messages = self.store.api_view(parent_id=parent_id)
             except Exception as e:  # noqa: BLE001
                 print(f"[auto-compact failed: {e}]", file=sys.stderr, flush=True)
 
-        return self.store.api_view(parent_id=parent_id)
+        return messages
 
     def _clear_old_tool_results(self, parent_id: str | None) -> None:
         """Replace old ToolResultMessage content with '[Cleared]' in-place.
@@ -527,10 +524,6 @@ class QueryEngine:
             if isinstance(m, ToolResultMessage) and not m.content.startswith(
                 cleared_marker
             ):
-                # Tracker has those chars in last.input; notify so its
-                # baseline subtracts them and context_tokens_used stays
-                # accurate until the next record() rebaselines.
-                usage._tracker.note_content_cleared(len(m.content), len(cleared_marker))
                 m.content = cleared_marker
                 m.output = None
 
@@ -541,7 +534,7 @@ class QueryEngine:
     _API_ROUND_RESERVE = 13_000         # one turn of thinking + response
     _COMPACT_CALL_RESERVE = 20_000      # buffer for compact's own LLM call
 
-    def _should_auto_compact(self) -> bool:
+    def _should_auto_compact(self, messages: list[BaseMessage]) -> bool:
         """Compact when less than ~53k tokens of headroom remain.
 
         The reserve covers: room for compact's summary output, one API
@@ -549,7 +542,18 @@ class QueryEngine:
         doesn't fail on first attempt due to token-estimation drift.
         """
         reserve = self._COMPACT_SUMMARY_RESERVE + self._API_ROUND_RESERVE + self._COMPACT_CALL_RESERVE
-        return usage._tracker.headroom_left() < reserve
+        return usage._tracker.headroom_left(messages) < reserve
+
+    def current_context_tokens(self, parent_id: str | None = None) -> int:
+        """Convenience wrapper for UI callers that don't already hold api_view.
+
+        `/context` and the TUI status bar read this — they don't want to
+        assemble a LangChain message list themselves. Tracker logic stays
+        pure (no store reference) by funnelling through here.
+        """
+        return usage._tracker.context_tokens_used(
+            self.store.api_view(parent_id=parent_id)
+        )
 
 
 # ---------------------------------------------------------------------------
