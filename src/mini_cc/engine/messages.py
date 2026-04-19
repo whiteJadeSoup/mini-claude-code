@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Annotated, Literal, Union
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage, ToolMessage
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 def _default_session_id() -> str:
@@ -80,6 +80,16 @@ class ToolResultMessage(Message):
     content: str
     tool_call_id: str
     output: Any = None   # ToolOutput instance for UI; None when validation failed
+
+    @field_validator("output", mode="before")
+    @classmethod
+    def _reconstruct_output(cls, v: Any) -> Any:
+        # Lazy import avoids a circular dep at module load; called only during
+        # deserialization (e.g. transcript replay), not on normal in-process writes.
+        if isinstance(v, dict):
+            from mini_cc.tools.base import output_from_dict
+            return output_from_dict(v)
+        return v
 
 
 # --- Layer 2: UI Messages ---

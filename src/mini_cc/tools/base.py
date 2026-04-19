@@ -1,9 +1,9 @@
 """MiniTool base framework: structured Output types, render protocol, registry."""
 import inspect
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, model_validator
 from langchain_core.tools import StructuredTool
 
 
@@ -12,6 +12,7 @@ from langchain_core.tools import StructuredTool
 # ---------------------------------------------------------------------------
 
 class ToolOutput(BaseModel):
+    type: str = "base"
     is_error: bool = False
 
     def to_api_str(self) -> str:
@@ -19,6 +20,7 @@ class ToolOutput(BaseModel):
 
 
 class ToolErrorOutput(ToolOutput):
+    type: Literal["error"] = "error"
     is_error: bool = True
     message: str
 
@@ -27,14 +29,21 @@ class ToolErrorOutput(ToolOutput):
 
 
 class CommandOutput(ToolOutput):
+    type: Literal["command"] = "command"
     stdout: str
     returncode: int
+
+    @model_validator(mode="after")
+    def _derive_is_error(self) -> "CommandOutput":
+        self.is_error = self.returncode != 0
+        return self
 
     def to_api_str(self) -> str:
         return self.stdout if self.stdout else "(no output)"
 
 
 class FileWriteOutput(ToolOutput):
+    type: Literal["file_write"] = "file_write"
     path: str
     bytes_written: int
 
@@ -43,8 +52,14 @@ class FileWriteOutput(ToolOutput):
 
 
 class FileEditOutput(ToolOutput):
+    type: Literal["file_edit"] = "file_edit"
     path: str
     replaced: bool
+
+    @model_validator(mode="after")
+    def _derive_is_error(self) -> "FileEditOutput":
+        self.is_error = not self.replaced
+        return self
 
     def to_api_str(self) -> str:
         if self.replaced:
@@ -53,6 +68,7 @@ class FileEditOutput(ToolOutput):
 
 
 class TodoPlanOutput(ToolOutput):
+    type: Literal["todo_plan"] = "todo_plan"
     count: int
     rendered: str
 
@@ -61,6 +77,7 @@ class TodoPlanOutput(ToolOutput):
 
 
 class TodoUpdateOutput(ToolOutput):
+    type: Literal["todo_update"] = "todo_update"
     item: str
     status: str
     rendered: str
@@ -70,6 +87,7 @@ class TodoUpdateOutput(ToolOutput):
 
 
 class TaskPlanOutput(ToolOutput):
+    type: Literal["task_plan"] = "task_plan"
     count: int
     rendered: str
 
@@ -78,6 +96,7 @@ class TaskPlanOutput(ToolOutput):
 
 
 class TaskUpdateOutput(ToolOutput):
+    type: Literal["task_update"] = "task_update"
     task_id: str
     status: str
     rendered: str
@@ -87,6 +106,7 @@ class TaskUpdateOutput(ToolOutput):
 
 
 class RunSkillOutput(ToolOutput):
+    type: Literal["run_skill"] = "run_skill"
     skill_name: str
     result: str
 
@@ -95,10 +115,35 @@ class RunSkillOutput(ToolOutput):
 
 
 class SubTaskOutput(ToolOutput):
+    type: Literal["sub_task"] = "sub_task"
     result: str
 
     def to_api_str(self) -> str:
         return self.result
+
+
+# ---------------------------------------------------------------------------
+# Output deserialization registry — maps type string → concrete class
+# ---------------------------------------------------------------------------
+
+_OUTPUT_TYPES: dict[str, type[ToolOutput]] = {
+    "error":       ToolErrorOutput,
+    "command":     CommandOutput,
+    "file_write":  FileWriteOutput,
+    "file_edit":   FileEditOutput,
+    "todo_plan":   TodoPlanOutput,
+    "todo_update": TodoUpdateOutput,
+    "task_plan":   TaskPlanOutput,
+    "task_update": TaskUpdateOutput,
+    "run_skill":   RunSkillOutput,
+    "sub_task":    SubTaskOutput,
+}
+
+
+def output_from_dict(d: dict) -> ToolOutput:
+    """Reconstruct the correct ToolOutput subclass from a serialized dict."""
+    cls = _OUTPUT_TYPES.get(d.get("type", ""), ToolOutput)
+    return cls.model_validate(d)
 
 
 # ---------------------------------------------------------------------------
@@ -139,7 +184,7 @@ class MiniTool(ABC):
             return self.handle_error(kwargs, e)
 
     def handle_error(self, args: dict, error: Exception) -> ToolOutput:
-        return ToolErrorOutput(message=f"Error: {error}")
+        return ToolErrorOutput(message=f"{type(error).__name__}: {error}")
 
     # -- render methods --
 
@@ -191,6 +236,8 @@ class MiniTool(ABC):
         )
 
     def _fmt_validation_error(self, e: ValidationError) -> str:
+        # Uses inspect.signature directly rather than building a new StructuredTool
+        # instance, which would be wasteful on every validation-error call.
         sig_str = self.args_schema_description()
         fields = "; ".join(
             f"{err['loc'][0]}: {err['msg']}" for err in e.errors()

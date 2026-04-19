@@ -8,13 +8,13 @@ from mini_cc.tools.base import (
     CommandOutput, FileWriteOutput, FileEditOutput,
     TodoPlanOutput, TodoUpdateOutput, TaskPlanOutput, TaskUpdateOutput,
     RunSkillOutput, SubTaskOutput,
-    MiniTool, register, get_tool, _REGISTRY,
+    MiniTool, register, get_tool, _REGISTRY, output_from_dict,
 )
 from mini_cc.engine.messages import ToolResultMessage
 
 
 # ---------------------------------------------------------------------------
-# Output types
+# Output types — to_api_str
 # ---------------------------------------------------------------------------
 
 class TestToolOutput:
@@ -75,6 +75,87 @@ class TestToolOutput:
     def test_sub_task_output(self):
         out = SubTaskOutput(result="subtask done")
         assert out.to_api_str() == "subtask done"
+
+
+# ---------------------------------------------------------------------------
+# is_error derivation — model validators
+# ---------------------------------------------------------------------------
+
+class TestIsErrorDerivation:
+    def test_command_success_is_not_error(self):
+        out = CommandOutput(stdout="ok", returncode=0)
+        assert out.is_error is False
+
+    def test_command_nonzero_is_error(self):
+        out = CommandOutput(stdout="fail", returncode=1)
+        assert out.is_error is True
+
+    def test_command_nonzero_arbitrary_code(self):
+        out = CommandOutput(stdout="out", returncode=127)
+        assert out.is_error is True
+
+    def test_file_edit_replaced_is_not_error(self):
+        out = FileEditOutput(path="f.py", replaced=True)
+        assert out.is_error is False
+
+    def test_file_edit_not_replaced_is_error(self):
+        out = FileEditOutput(path="f.py", replaced=False)
+        assert out.is_error is True
+
+
+# ---------------------------------------------------------------------------
+# Output type field — serialization / deserialization
+# ---------------------------------------------------------------------------
+
+class TestOutputTypeSerialization:
+    def test_command_output_has_type_field(self):
+        d = CommandOutput(stdout="hi", returncode=0).model_dump()
+        assert d["type"] == "command"
+
+    def test_file_edit_output_has_type_field(self):
+        d = FileEditOutput(path="f.py", replaced=True).model_dump()
+        assert d["type"] == "file_edit"
+
+    def test_all_concrete_types_have_unique_type_keys(self):
+        instances = [
+            ToolErrorOutput(message="x"),
+            CommandOutput(stdout="x", returncode=0),
+            FileWriteOutput(path="p", bytes_written=0),
+            FileEditOutput(path="p", replaced=True),
+            TodoPlanOutput(count=0, rendered=""),
+            TodoUpdateOutput(item="i", status="done", rendered=""),
+            TaskPlanOutput(count=0, rendered=""),
+            TaskUpdateOutput(task_id="t", status="done", rendered=""),
+            RunSkillOutput(skill_name="s", result="r"),
+            SubTaskOutput(result="r"),
+        ]
+        type_keys = [i.model_dump()["type"] for i in instances]
+        assert len(set(type_keys)) == len(type_keys), "duplicate type keys"
+
+    def test_output_from_dict_roundtrip_command(self):
+        original = CommandOutput(stdout="hello", returncode=0)
+        d = original.model_dump(mode="json")
+        reconstructed = output_from_dict(d)
+        assert isinstance(reconstructed, CommandOutput)
+        assert reconstructed.stdout == "hello"
+        assert reconstructed.returncode == 0
+        assert reconstructed.is_error is False
+
+    def test_output_from_dict_roundtrip_file_edit_error(self):
+        original = FileEditOutput(path="app.py", replaced=False)
+        d = original.model_dump(mode="json")
+        reconstructed = output_from_dict(d)
+        assert isinstance(reconstructed, FileEditOutput)
+        assert reconstructed.replaced is False
+        assert reconstructed.is_error is True
+
+    def test_output_from_dict_unknown_type_falls_back_to_base(self):
+        reconstructed = output_from_dict({"type": "unknown_future_type", "is_error": False})
+        assert isinstance(reconstructed, ToolOutput)
+
+    def test_output_from_dict_missing_type_falls_back_to_base(self):
+        reconstructed = output_from_dict({"is_error": False})
+        assert isinstance(reconstructed, ToolOutput)
 
 
 # ---------------------------------------------------------------------------
@@ -193,6 +274,12 @@ class TestExecuteWrapper:
         assert "test failure" in result.message
 
     @pytest.mark.asyncio
+    async def test_handle_error_includes_exception_type(self):
+        t = self._make_tool(raises=ValueError("bad value"))
+        result = await t.execute(x="hi")
+        assert "ValueError" in result.message
+
+    @pytest.mark.asyncio
     async def test_execute_never_raises(self):
         t = self._make_tool(raises=ValueError("bad value"))
         try:
@@ -271,7 +358,7 @@ class TestRenderMethods:
 
 
 # ---------------------------------------------------------------------------
-# ToolResultMessage — output field
+# ToolResultMessage — output field + typed roundtrip
 # ---------------------------------------------------------------------------
 
 class TestToolResultMessageOutput:
@@ -297,10 +384,28 @@ class TestToolResultMessageOutput:
         assert msg.output is None
         assert msg.content == "done"
 
-    def test_output_serializes_to_dict_in_jsonl(self):
+    def test_roundtrip_preserves_subclass_type(self):
+        """Transcript replay: deserializing output dict recovers the correct subclass."""
         out = CommandOutput(stdout="hi", returncode=0)
         msg = ToolResultMessage(content="hi", tool_call_id="c1", output=out)
-        dumped = json.dumps(msg.model_dump(mode="json"))
-        loaded = json.loads(dumped)
-        assert loaded["output"]["stdout"] == "hi"
-        assert loaded["output"]["returncode"] == 0
+        raw = json.loads(json.dumps(msg.model_dump(mode="json")))
+        reloaded = ToolResultMessage.model_validate(raw)
+        assert isinstance(reloaded.output, CommandOutput)
+        assert reloaded.output.stdout == "hi"
+        assert reloaded.output.is_error is False
+
+    def test_roundtrip_error_output_preserves_is_error(self):
+        out = FileEditOutput(path="app.py", replaced=False)
+        msg = ToolResultMessage(content="err", tool_call_id="c1", output=out)
+        raw = json.loads(json.dumps(msg.model_dump(mode="json")))
+        reloaded = ToolResultMessage.model_validate(raw)
+        assert isinstance(reloaded.output, FileEditOutput)
+        assert reloaded.output.is_error is True
+
+    def test_output_type_field_present_in_jsonl(self):
+        out = CommandOutput(stdout="hi", returncode=0)
+        msg = ToolResultMessage(content="hi", tool_call_id="c1", output=out)
+        dumped = json.loads(json.dumps(msg.model_dump(mode="json")))
+        assert dumped["output"]["type"] == "command"
+        assert dumped["output"]["stdout"] == "hi"
+        assert dumped["output"]["returncode"] == 0

@@ -523,6 +523,7 @@ class QueryEngine:
                 "[Cleared]"
             ):
                 m.content = "[Cleared]"
+                m.output = None
 
     # Headroom constants kept out of the condition so they're easy to tune.
     # Large headroom is intentional: compact() itself sends the full history

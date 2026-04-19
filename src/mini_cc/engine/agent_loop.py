@@ -36,7 +36,7 @@ from mini_cc.engine.messages import (
 )
 from mini_cc.engine.store import _triggering_asst_id
 from mini_cc.state import usage
-from mini_cc.tools.base import ToolOutput, get_tool
+from mini_cc.tools.base import ToolOutput, ToolErrorOutput, get_tool
 
 
 class AgentLoop:
@@ -145,7 +145,8 @@ class AgentLoop:
                         output = raw
                     else:
                         content = str(raw)
-                        output = None
+                        # validation error returns str; wrap so TUI shows red ●
+                        output = ToolErrorOutput(message=content) if mini is not None else None
 
                 yield ToolResultMessage(
                     content=content,
