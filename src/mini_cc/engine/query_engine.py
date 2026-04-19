@@ -25,7 +25,6 @@ from __future__ import annotations
 import sys
 import uuid
 from collections.abc import Callable
-from typing import Protocol
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
@@ -44,27 +43,12 @@ from mini_cc.engine.messages import (
     ToolUseBlock,
     UserMessage,
 )
+from mini_cc.engine.predicates import Predicate, accept_all
 from mini_cc.engine.store import MessageStore
+from mini_cc.engine.subscription import Consumer, Policy, Subscription
+from mini_cc.engine.transforms import Transform, identity
 from mini_cc.state import tasks, usage
 from mini_cc.tools.skills import _skill_manager
-
-
-# ---------------------------------------------------------------------------
-# Consumer protocol
-# ---------------------------------------------------------------------------
-
-
-class Consumer(Protocol):
-    """Anything with an async on_message(msg) coroutine.
-
-    QueuedConsumer implementors return immediately from on_message (put to
-    queue) and process in a background drain task, so _dispatch is never
-    blocked by slow consumer logic. stop() is optional — engine.shutdown()
-    calls it if present to drain queues before process exit.
-    """
-
-    async def on_message(self, msg: Message) -> None:  # pragma: no cover (protocol)
-        ...
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +95,7 @@ class QueryEngine:
         self._model_name = model_name
         self._build_system_prompt = system_prompt_builder
         self.store = MessageStore()
-        self._consumers: list[Consumer] = []
+        self._subscriptions: list[Subscription] = []
         # Pre-built AgentLoop instances for main branch and sidechains.
         # Construction is cheap — split purely so each loop owns its own
         # bound_llm + tool registry. Engine keeps no loop state.
@@ -128,35 +112,69 @@ class QueryEngine:
 
     # -- subscribers --------------------------------------------------------
 
-    def subscribe(self, consumer: Consumer) -> None:
-        self._consumers.append(consumer)
+    def subscribe(
+        self,
+        consumer: Consumer,
+        *,
+        name: str | None = None,
+        filter: Predicate | None = None,
+        transform: Transform | None = None,
+        policy: Policy = "sync",
+        drop_oldest_maxsize: int = 256,
+    ) -> Subscription:
+        """Register a consumer. Kwargs declare *what* it gets and *how*.
+
+        The default ``policy="sync"`` preserves the old direct-await
+        dispatch semantics (tests observe messages the moment
+        ``engine.query`` returns). Consumers that need their own drain
+        task (persistence, UI) opt in with ``policy="async"``.
+        """
+        sub = Subscription(
+            consumer=consumer,
+            name=name or type(consumer).__name__,
+            filter=filter if filter is not None else accept_all,
+            transform=transform if transform is not None else identity,
+            policy=policy,
+            drop_oldest_maxsize=drop_oldest_maxsize,
+        )
+        self._subscriptions.append(sub)
+        return sub
+
+    @property
+    def subscriptions(self) -> tuple[Subscription, ...]:
+        return tuple(self._subscriptions)
 
     async def _dispatch(self, msg: Message) -> None:
-        """Append to store, then notify every consumer in registration order.
+        """Append to store, then route to each subscription whose filter matches.
 
-        Consumer exceptions are isolated — one broken consumer never
-        stops the turn or prevents other consumers from receiving the
-        message. Matches the error policy the store used to apply to
-        its own subscribers.
+        Filter exceptions are isolated per-subscription: a misbehaving
+        predicate drops the match for that subscription (recorded in
+        ``stats``) but does not stop the rest of the fan-out. Consumer
+        exceptions are isolated inside ``Subscription.deliver``.
         """
         self.store.append(msg)
-        for c in self._consumers:
+        for sub in self._subscriptions:
             try:
-                await c.on_message(msg)
-            except Exception as e:  # noqa: BLE001 — backstop, engine must never crash here
-                print(
-                    f"[engine: consumer {type(c).__name__!r} error: {e}]",
-                    file=sys.stderr,
-                    flush=True,
-                )
+                if not sub.filter(msg):
+                    continue
+            except Exception as e:  # noqa: BLE001
+                sub.record_error(f"filter: {e!r}")
+                continue
+            await sub.deliver(msg)
 
     # -- boot ---------------------------------------------------------------
 
     async def shutdown(self) -> None:
-        """Drain and stop all consumer queues. Call once before process exit."""
-        for c in self._consumers:
-            if hasattr(c, "stop"):
-                await c.stop()
+        """Drain and stop every subscription. Call once before process exit."""
+        for sub in self._subscriptions:
+            try:
+                await sub.stop()
+            except Exception as e:  # noqa: BLE001
+                print(
+                    f"[engine: sub {sub.name!r} stop failed: {e}]",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
     async def boot(self) -> None:
         """Seed the session with a system prompt and any pending task state.
@@ -165,6 +183,8 @@ class QueryEngine:
         system prompt + task-state injection must be visible to
         persistence and UI, so they go through _dispatch.
         """
+        for sub in self._subscriptions:
+            await sub.start()
         await self._dispatch(
             SystemPromptMessage(content=self._build_system_prompt(), source="boot")
         )
@@ -431,12 +451,15 @@ class QueryEngine:
                 m.content = "[Cleared]"
 
     # Headroom constants kept out of the condition so they're easy to tune.
+    # Large headroom is intentional: compact() itself sends the full history
+    # to the LLM, so we must leave room for that call to succeed.
     _COMPACT_SUMMARY_RESERVE = 20_000   # typical compact summary length
     _API_ROUND_RESERVE = 13_000         # one turn of thinking + response
+    _COMPACT_CALL_RESERVE = 20_000      # buffer for compact's own LLM call
 
     def _should_auto_compact(self) -> bool:
-        """Compact when: current_tokens + 20k + 13k > window_limit."""
-        headroom = self._COMPACT_SUMMARY_RESERVE + self._API_ROUND_RESERVE
+        """Compact when projected next input would leave less than ~53k headroom."""
+        headroom = self._COMPACT_SUMMARY_RESERVE + self._API_ROUND_RESERVE + self._COMPACT_CALL_RESERVE
         return (
             usage._tracker.projected_next_input() + headroom
             > usage._tracker.context_limit
@@ -447,11 +470,11 @@ class QueryEngine:
 
         Catches the gap where a large tool result was added after the last
         LLM call — projected_next_input() won't see those tokens yet.
-        ~3 chars/token is conservative; better to compact one call early
-        than to hit a 400.
+        Uses // 2 (not // 3) because code, JSON, and Chinese text run closer
+        to 1-2 chars/token; underestimating here causes missed compacts.
         """
-        estimated = sum(len(str(getattr(m, "content", ""))) for m in messages) // 3
-        headroom = self._COMPACT_SUMMARY_RESERVE + self._API_ROUND_RESERVE
+        estimated = sum(len(str(getattr(m, "content", ""))) for m in messages) // 2
+        headroom = self._COMPACT_SUMMARY_RESERVE + self._API_ROUND_RESERVE + self._COMPACT_CALL_RESERVE
         return estimated + headroom > usage._tracker.context_limit
 
 

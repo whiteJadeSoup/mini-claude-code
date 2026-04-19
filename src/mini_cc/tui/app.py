@@ -32,7 +32,7 @@ from textual.containers import VerticalScroll
 from textual.message import Message as TxtMessage
 from textual.widgets import Input, Markdown, Static
 
-from mini_cc.consumers.base import QueuedConsumer
+from mini_cc.engine.predicates import is_persisted_layer
 from mini_cc.engine.messages import (
     AssistantMessage,
     CompactBoundaryMessage,
@@ -468,8 +468,13 @@ class MiniCCApp(App):
         set_engine(engine)
         self._engine = engine
 
-        engine.subscribe(PersistenceConsumer())
-        engine.subscribe(TextualUIConsumer(self))
+        engine.subscribe(
+            PersistenceConsumer(),
+            name="persistence",
+            filter=is_persisted_layer,
+            policy="async",
+        )
+        engine.subscribe(TextualUIConsumer(self), name="tui", policy="async")
         commands.sync_skill_commands(_skill_manager)
         await engine.boot()
 
@@ -660,12 +665,15 @@ class MiniCCApp(App):
 # ---------------------------------------------------------------------------
 
 
-class TextualUIConsumer(QueuedConsumer):
-    """Routes engine messages to MiniCCApp via Textual's message bus."""
+class TextualUIConsumer:
+    """Routes engine messages to MiniCCApp via Textual's message bus.
+
+    Queue and lifecycle live on the ``Subscription``; this class only
+    declares *what to do* with each message.
+    """
 
     def __init__(self, app: MiniCCApp) -> None:
-        super().__init__()
         self._app = app
 
-    async def _handle(self, msg: Message) -> None:
+    async def on_message(self, msg: Message) -> None:
         self._app.post_message(EngineMsg(msg))

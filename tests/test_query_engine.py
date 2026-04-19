@@ -162,3 +162,58 @@ class TestBoot:
         await eng.boot()
         from mini_cc.engine.messages import SystemPromptMessage
         assert any(isinstance(m, SystemPromptMessage) for m in c.messages)
+
+
+class TestSubscriptions:
+    @pytest.mark.asyncio
+    async def test_subscriptions_property_is_readonly_tuple(
+        self, isolated_home, fresh_tasks
+    ):
+        eng = _make_engine(_ScriptedLLM([]))
+        eng.subscribe(_CollectingConsumer())
+        eng.subscribe(_CollectingConsumer(), name="second")
+        subs = eng.subscriptions
+        assert isinstance(subs, tuple)
+        assert len(subs) == 2
+        assert subs[1].name == "second"
+
+    @pytest.mark.asyncio
+    async def test_default_subscribe_preserves_legacy_behavior(
+        self, isolated_home, fresh_tasks
+    ):
+        from mini_cc.engine.predicates import accept_all
+        from mini_cc.engine.transforms import identity
+        eng = _make_engine(_ScriptedLLM([_ai(text="ok")]))
+        c = _CollectingConsumer()
+        sub = eng.subscribe(c)
+        assert sub.name == "_CollectingConsumer"
+        assert sub.filter is accept_all
+        assert sub.transform is identity
+        assert sub.policy == "sync"
+
+    @pytest.mark.asyncio
+    async def test_filter_blocks_unmatched_messages(
+        self, isolated_home, fresh_tasks
+    ):
+        eng = _make_engine(_ScriptedLLM([_ai(text="hi")]))
+        c = _CollectingConsumer()
+        eng.subscribe(c, filter=lambda m: False)
+        await eng.query("hello")
+        assert c.messages == []
+
+    @pytest.mark.asyncio
+    async def test_filter_exception_isolated(
+        self, isolated_home, fresh_tasks, capsys
+    ):
+        eng = _make_engine(_ScriptedLLM([_ai(text="hi")]))
+        good = _CollectingConsumer()
+
+        def raising(_m):
+            raise RuntimeError("filter boom")
+
+        bad_sub = eng.subscribe(_CollectingConsumer(), filter=raising)
+        eng.subscribe(good)
+        await eng.query("hello")
+        assert good.messages
+        assert bad_sub.stats.errors > 0
+        assert "filter" in (bad_sub.stats.last_error or "")

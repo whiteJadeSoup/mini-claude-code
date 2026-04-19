@@ -40,7 +40,6 @@ src/mini_cc/
 │  ├─ messages.py           — Pydantic message types
 │  └─ store.py              — MessageStore (api_view, adjacency, layer classification)
 ├─ consumers/
-│  ├─ ui.py                 — RichUIConsumer
 │  └─ persistence.py        — PersistenceConsumer, transcript_path()
 ├─ state/
 │  ├─ tasks.py              — TaskManager + _tasks singleton (DAG-aware)

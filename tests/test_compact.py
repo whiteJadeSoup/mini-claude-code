@@ -234,11 +234,9 @@ class TestCompactPersists:
     @pytest.mark.asyncio
     async def test_compact_messages_written_to_jsonl(self, engine):
         from mini_cc.consumers.persistence import PersistenceConsumer
-        pc = PersistenceConsumer()
-        engine.subscribe(pc)
+        engine.subscribe(PersistenceConsumer(), name="persistence")
         _populate(engine)
         await engine.compact(auto=True)
-        await pc.stop()  # drain queue before reading the file
         path = persistence.transcript_path()
         assert path.exists()
         records = [
