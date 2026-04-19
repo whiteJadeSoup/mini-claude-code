@@ -42,7 +42,6 @@ from mini_cc.engine.messages import (
     TextBlock,
     ToolResultMessage,
     ToolUseBlock,
-    UserMessage,
 )
 from mini_cc.state import usage
 
@@ -561,11 +560,6 @@ class MiniCCApp(App):
 
         elif isinstance(payload, ToolResultMessage):
             tool_status.complete_tool(payload.tool_call_id)
-
-        elif isinstance(payload, UserMessage):
-            if payload.is_synthetic:
-                first = (payload.content or "").splitlines()[0] if payload.content else ""
-                chat_log.append_markup(f"[grey35]⎿ system · {first[:80]}[/grey35]")
 
         elif isinstance(payload, CompactBoundaryMessage):
             label = "auto-compact" if payload.auto else "compact"
