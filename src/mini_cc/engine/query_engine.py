@@ -237,7 +237,23 @@ class QueryEngine:
                         print("[context exceeded — auto-compacting]",
                               file=sys.stderr, flush=True)
                         try:
-                            await self.compact(auto=True)
+                            from mini_cc.consumers import persistence
+                            from mini_cc.engine._diagnostics import log_event, tracker_snapshot
+                            gap = _parse_context_gap_tokens(str(e))
+                            log_event(
+                                "astream_context_exceeded",
+                                session_id=persistence.SESSION_ID,
+                                source="agent",
+                                tracker_before=tracker_snapshot(),
+                                store_estimate_chars=sum(
+                                    len(m.content) if hasattr(m, "content") and isinstance(m.content, str) else 0
+                                    for m in self.store.api_view(parent_id=None)
+                                ),
+                                error=str(e),
+                                gap_tokens=gap,
+                                caught_by="query_retry",
+                            )
+                            await self.compact(auto=True, trigger="query_retry")
                             # Re-add the user's original message so the model
                             # still knows what was asked after compact clears it.
                             self.store._messages.append(
@@ -305,7 +321,12 @@ class QueryEngine:
 
     _MAX_COMPACT_ATTEMPTS = 3  # K in the plan — retry budget for overflow recovery
 
-    async def compact(self, custom_instructions: str = "", auto: bool = False) -> int:
+    async def compact(
+        self,
+        custom_instructions: str = "",
+        auto: bool = False,
+        trigger: str = "manual",
+    ) -> int:
         """Summarize, clear Layer 1, and re-seed with system + boundary + summary.
 
         Does NOT yield. Compact is a boundary event, not a conversational
@@ -318,8 +339,17 @@ class QueryEngine:
         ApiRounds, drop the oldest until it fits, and retry up to
         _MAX_COMPACT_ATTEMPTS times, using the provider's error message
         to compute the next drop size (DeepSeek gap / 20% fallback).
+
+        `trigger` labels the call in the diagnostic log: "pre_call" from
+        _prepare_messages, "query_retry" from the query()-level retry,
+        "manual" from the /compact slash command.
         """
         from mini_cc.tools.builtins import _sub_agent_scope
+        from mini_cc.consumers import persistence
+        from mini_cc.engine._diagnostics import log_event, tracker_snapshot
+
+        # Snapshot BEFORE _sub_agent_scope swaps the tracker for the sub-agent's fresh one.
+        tracker_before = tracker_snapshot()
 
         # Snapshot the system prompt so we can re-insert it after
         # clear_layer_1. We insert it via direct list manipulation
@@ -361,84 +391,137 @@ class QueryEngine:
         formatted = ""
         sent_chars = 0
 
-        with _sub_agent_scope("compact"):
-            while True:
-                kept, dropped, marker_needed = _plan_kept_groups(
-                    groups, budget_chars, extra_chars_to_shed=extra_chars
+        # Diagnostic accumulators — written to JSONL on any exit path.
+        diag_attempts: list[dict] = []
+        final_outcome = "success"
+        final_error: str | None = None
+
+        try:
+            with _sub_agent_scope("compact"):
+                while True:
+                    kept, dropped, marker_needed = _plan_kept_groups(
+                        groups, budget_chars, extra_chars_to_shed=extra_chars
+                    )
+
+                    messages_to_send: list[BaseMessage] = []
+                    if marker_needed:
+                        messages_to_send.append(HumanMessage(content=MARKER_TEXT))
+                    for g in kept:
+                        messages_to_send.extend(g.messages)
+
+                    formatted = _format_history_for_summary(messages_to_send)
+                    if custom_instructions:
+                        formatted += f"\n\n## Compact Instructions\n{custom_instructions}"
+                    sent_chars = len(formatted)
+
+                    attempt_record: dict = {
+                        "attempt": attempt,
+                        "extra_chars": extra_chars,
+                        "dropped_rounds": dropped,
+                        "retained_rounds": len(kept),
+                        "marker_used": marker_needed,
+                        "sent_chars": sent_chars,
+                    }
+
+                    try:
+                        response = await self._llm_base.ainvoke(
+                            [
+                                SystemMessage(content=prompts.COMPACT_PROMPT),
+                                HumanMessage(content=formatted),
+                            ]
+                        )
+                        usage._tracker.record(
+                            "compact",
+                            response.usage_metadata,
+                            getattr(response, "response_metadata", None),
+                        )
+                        attempt_record["outcome"] = "success"
+                        um = response.usage_metadata or {}
+                        attempt_record["response_input_tokens"] = um.get("input_tokens")
+                        attempt_record["response_output_tokens"] = um.get("output_tokens")
+                        diag_attempts.append(attempt_record)
+                        break
+                    except Exception as e:  # noqa: BLE001
+                        if not _is_context_exceeded(e):
+                            attempt_record["outcome"] = "non_context_error"
+                            attempt_record["error"] = str(e)
+                            diag_attempts.append(attempt_record)
+                            final_outcome = "non_context_error"
+                            final_error = str(e)
+                            raise
+                        attempt += 1
+                        if attempt >= self._MAX_COMPACT_ATTEMPTS:
+                            attempt_record["outcome"] = "context_exceeded"
+                            attempt_record["error"] = str(e)
+                            diag_attempts.append(attempt_record)
+                            final_outcome = "context_exhausted"
+                            final_error = str(e)
+                            raise
+                        # Single-round overflow — more drops can't help (H2).
+                        if len(kept) <= 1:
+                            diag_attempts.append(attempt_record)
+                            final_outcome = "single_round_overflow"
+                            final_error = str(e)
+                            raise
+                        gap = _parse_context_gap_tokens(str(e))
+                        attempt_record["outcome"] = "context_exceeded"
+                        attempt_record["error"] = str(e)
+                        if gap is not None:
+                            attempt_record["gap_tokens"] = gap
+                        next_extra = _chars_to_shed_on_retry(str(e), usage._tracker.context_limit)
+                        attempt_record["next_extra_chars"] = next_extra
+                        diag_attempts.append(attempt_record)
+                        extra_chars += next_extra
+
+            summary = _extract_summary(response.content)
+            body = _build_compact_body(summary, auto=auto)
+            if task_state := tasks._tasks.state_summary():
+                body += f"\n\n---\n\nActive tasks at time of compaction:\n{task_state}"
+
+            # Reset tracker AFTER the compact call succeeds. If it had raised,
+            # the tracker keeps its last good record so the UI doesn't flip
+            # to "0 / 128k — no LLM calls yet" mid-session.
+            usage._tracker.reset()
+
+            self.store.clear_layer_1()
+            if system_msg is not None:
+                # Direct insert: consumers already saw this message at boot.
+                # Re-dispatching would duplicate JSONL + re-render in UI.
+                # Tracker doesn't need a separate notify — context_tokens_used
+                # reads the store on demand and will pick up the re-inserted
+                # SystemPromptMessage next time it's called.
+                self.store._messages.insert(0, system_msg)
+
+            await self._dispatch(
+                CompactBoundaryMessage(
+                    pre_count=pre_count,
+                    auto=auto,
+                    dropped_rounds=dropped,
+                    retained_rounds=len(kept),
+                    marker_used=marker_needed,
+                    attempts=attempt + 1,
+                    original_chars=original_chars,
+                    sent_chars=sent_chars,
+                    source="compact",
                 )
-
-                messages_to_send: list[BaseMessage] = []
-                if marker_needed:
-                    messages_to_send.append(HumanMessage(content=MARKER_TEXT))
-                for g in kept:
-                    messages_to_send.extend(g.messages)
-
-                formatted = _format_history_for_summary(messages_to_send)
-                if custom_instructions:
-                    formatted += f"\n\n## Compact Instructions\n{custom_instructions}"
-                sent_chars = len(formatted)
-
-                try:
-                    response = await self._llm_base.ainvoke(
-                        [
-                            SystemMessage(content=prompts.COMPACT_PROMPT),
-                            HumanMessage(content=formatted),
-                        ]
-                    )
-                    usage._tracker.record(
-                        "compact",
-                        response.usage_metadata,
-                        getattr(response, "response_metadata", None),
-                    )
-                    break
-                except Exception as e:  # noqa: BLE001
-                    if not _is_context_exceeded(e):
-                        raise
-                    attempt += 1
-                    if attempt >= self._MAX_COMPACT_ATTEMPTS:
-                        raise
-                    # Single-round overflow — more drops can't help (H2).
-                    if len(kept) <= 1:
-                        raise
-                    extra_chars += _chars_to_shed_on_retry(
-                        str(e), usage._tracker.context_limit
-                    )
-
-        summary = _extract_summary(response.content)
-        body = _build_compact_body(summary, auto=auto)
-        if task_state := tasks._tasks.state_summary():
-            body += f"\n\n---\n\nActive tasks at time of compaction:\n{task_state}"
-
-        # Reset tracker AFTER the compact call succeeds. If it had raised,
-        # the tracker keeps its last good record so the UI doesn't flip
-        # to "0 / 128k — no LLM calls yet" mid-session.
-        usage._tracker.reset()
-
-        self.store.clear_layer_1()
-        if system_msg is not None:
-            # Direct insert: consumers already saw this message at boot.
-            # Re-dispatching would duplicate JSONL + re-render in UI.
-            # Tracker doesn't need a separate notify — context_tokens_used
-            # reads the store on demand and will pick up the re-inserted
-            # SystemPromptMessage next time it's called.
-            self.store._messages.insert(0, system_msg)
-
-        await self._dispatch(
-            CompactBoundaryMessage(
-                pre_count=pre_count,
-                auto=auto,
-                dropped_rounds=dropped,
-                retained_rounds=len(kept),
-                marker_used=marker_needed,
-                attempts=attempt + 1,
-                original_chars=original_chars,
-                sent_chars=sent_chars,
-                source="compact",
             )
-        )
-        await self._dispatch(
-            UserMessage(content=body, is_synthetic=True, source="compact")
-        )
+            await self._dispatch(
+                UserMessage(content=body, is_synthetic=True, source="compact")
+            )
+        finally:
+            log_event(
+                "compact",
+                session_id=persistence.SESSION_ID,
+                trigger=trigger,
+                auto=auto,
+                tracker_before=tracker_before,
+                n_groups=len(groups),
+                original_chars=original_chars,
+                budget_chars=budget_chars,
+                attempts=diag_attempts,
+                final_outcome=final_outcome,
+                final_error=final_error,
+            )
 
         return max(0, pre_count - len(self.store.all()))
 
@@ -493,9 +576,24 @@ class QueryEngine:
 
         if self._should_auto_compact(messages):
             try:
-                await self.compact(auto=True)
+                await self.compact(auto=True, trigger="pre_call")
                 messages = self.store.api_view(parent_id=parent_id)
             except Exception as e:  # noqa: BLE001
+                from mini_cc.consumers import persistence
+                from mini_cc.engine._diagnostics import log_event, tracker_snapshot
+                log_event(
+                    "astream_context_exceeded",
+                    session_id=persistence.SESSION_ID,
+                    source=f"_prepare_messages(parent_id={parent_id})",
+                    tracker_before=tracker_snapshot(),
+                    store_estimate_chars=sum(
+                        len(m.content) if hasattr(m, "content") and isinstance(m.content, str) else 0
+                        for m in messages
+                    ),
+                    error=str(e),
+                    gap_tokens=_parse_context_gap_tokens(str(e)),
+                    caught_by="_prepare_messages",
+                )
                 print(f"[auto-compact failed: {e}]", file=sys.stderr, flush=True)
 
         return messages

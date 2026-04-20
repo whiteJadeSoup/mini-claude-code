@@ -90,7 +90,7 @@ async def cmd_exit(args, ctx):
 async def cmd_compact(args, ctx):
     ctx.notify("[Compacting...]")
     try:
-        n = await ctx.engine.compact(custom_instructions=args)
+        n = await ctx.engine.compact(custom_instructions=args, trigger="manual")
         ctx.notify(f"[Compacted: {n} messages removed]")
     except Exception as e:
         ctx.notify(f"[Compact failed: {e}]")
