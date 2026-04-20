@@ -9,7 +9,7 @@ on:
   - _parse_context_gap_tokens / _chars_to_shed_on_retry
   - compact retry state machine and MARKER injection
   - CompactBoundaryMessage audit metadata
-  - QueryEngine.current_context_tokens (record baseline + char-estimate max)
+  - UsageTracker.context_tokens_used (API-billed baseline + running delta)
 """
 from __future__ import annotations
 
@@ -304,17 +304,17 @@ def _populate_many_rounds(engine, n_rounds: int, chars_per_round: int = 1000) ->
     """Seed engine.store with n_rounds of user+assistant pairs.
 
     Enough variety so compact's grouping produces distinct ApiRounds.
+    Tracker sees nothing — context_tokens_used walks the store's api_view
+    at read time, so seeding directly into the store is enough.
     """
     engine.store.append(SystemPromptMessage(content="sys", source="boot"))
     for i in range(n_rounds):
         engine.store.append(UserMessage(content=f"user {i} " + "x" * chars_per_round))
-        engine.store.append(
-            AssistantMessage(
-                turn_id=f"t{i}",
-                model="m",
-                content=TextBlock(text=f"assistant {i} " + "x" * chars_per_round),
-            )
-        )
+        engine.store.append(AssistantMessage(
+            turn_id=f"t{i}",
+            model="m",
+            content=TextBlock(text=f"assistant {i} " + "x" * chars_per_round),
+        ))
 
 
 class TestCompactIntegration:
@@ -409,8 +409,11 @@ class TestCompactIntegration:
 
         with pytest.raises(RuntimeError, match="maximum context length"):
             await engine.compact(auto=True)
-        # Tracker must still hold the pre-existing record.
-        assert fresh_tracker.context_tokens_used() == 12345
+        # Tracker must still hold the pre-existing record — failed compact
+        # doesn't reset anything.
+        assert len(fresh_tracker._records) == 1
+        assert fresh_tracker._records[0].input == 12345
+        assert fresh_tracker._records[0].output == 100
 
     @pytest.mark.asyncio
     async def test_single_round_overflow_fast_fails(
@@ -432,55 +435,152 @@ class TestCompactIntegration:
 
 
 # ---------------------------------------------------------------------------
-# current_context_tokens — powers both the TUI footer and `/context`
+# UsageTracker.context_tokens_used — powers /context, TUI footer, and auto-compact
 # ---------------------------------------------------------------------------
 
 
-class TestCurrentContextTokens:
-    @pytest.mark.asyncio
-    async def test_empty_store_returns_zero(self, isolated_home, fresh_tracker):
-        engine = _make_engine(_ProgrammableLLM([]))
-        assert engine.current_context_tokens() == 0
+class TestContextTokensUsed:
+    """context_tokens_used(messages) returns what the next API call will send.
+
+    Design matches OpenCode / Roo-Code / Gemini CLI: trust the API's
+    last-reported input+output as baseline, locally char-estimate only
+    the messages dispatched AFTER that response (tool_results, pending
+    user msg).
+    """
 
     @pytest.mark.asyncio
-    async def test_scales_with_history_size(self, isolated_home, fresh_tracker):
-        engine = _make_engine(_ProgrammableLLM([]))
-        _populate_many_rounds(engine, 5, chars_per_round=1000)
-        est = engine.current_context_tokens()
-        # ~5 * 2 * 1000 chars / 2 tokens-per-char ≈ 5000, with overhead.
-        assert est > 3_000
+    async def test_empty_returns_zero(self, isolated_home, fresh_tracker):
+        assert fresh_tracker.context_tokens_used([]) == 0
 
     @pytest.mark.asyncio
-    async def test_prefers_record_baseline_when_larger(
+    async def test_pre_first_record_uses_char_estimate(
         self, isolated_home, fresh_tracker
     ):
-        # Tracker has a record with input=5000, output=500 — baseline 5500.
-        # Store is tiny so char estimate is small. Expect record baseline wins.
+        # No record() yet (boot / post-compact): full-history char estimate.
+        msgs = [
+            HumanMessage(content="x" * 5000),
+        ]
+        est = fresh_tracker.context_tokens_used(msgs)
+        # ~5k chars / 2 tokens-per-char ≈ 2500, plus overhead.
+        assert est > 2_000
+
+    @pytest.mark.asyncio
+    async def test_post_record_baseline_when_ends_in_ai(
+        self, isolated_home, fresh_tracker
+    ):
+        # After record() and with api_view ending in an AI message (no
+        # tool_results yet), occupancy = API baseline exactly.
         fresh_tracker.record(
             "agent",
             {"input_tokens": 5000, "output_tokens": 500, "total_tokens": 5500},
             {"model_name": "stub"},
         )
-        engine = _make_engine(_ProgrammableLLM([]))
-        engine.store.append(SystemPromptMessage(content="sys", source="boot"))
-        engine.store.append(UserMessage(content="hi"))
-        assert engine.current_context_tokens() == 5500
+        msgs = [
+            HumanMessage(content="hi"),
+            AIMessage(content="there"),
+        ]
+        assert fresh_tracker.context_tokens_used(msgs) == 5500
 
     @pytest.mark.asyncio
-    async def test_prefers_char_estimate_when_larger(
+    async def test_pending_tool_result_added_to_baseline(
         self, isolated_home, fresh_tracker
     ):
-        # Tracker has a tiny record — but a huge tool_result has landed since,
-        # so the store's char-estimate now exceeds the record baseline.
+        # A big tool_result landed after the last API response. The walk
+        # stops at the last AIMessage; everything after counts as pending.
         fresh_tracker.record(
             "agent",
             {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110},
             {"model_name": "stub"},
         )
-        engine = _make_engine(_ProgrammableLLM([]))
-        _populate_many_rounds(engine, 3, chars_per_round=2000)
-        # Char estimate ≥ ~6k > 110 baseline.
-        assert engine.current_context_tokens() > 110
+        msgs = [
+            HumanMessage(content="hi"),
+            AIMessage(content="calling tool", tool_calls=[{"id": "1", "name": "read", "args": {}}]),
+            ToolMessage(content="y" * 10_000, tool_call_id="1"),
+        ]
+        # baseline(110) + ~5k from 10k tool_result chars ≫ 110.
+        assert fresh_tracker.context_tokens_used(msgs) > 3_000
+
+    @pytest.mark.asyncio
+    async def test_walk_stops_at_last_ai_only(self, isolated_home, fresh_tracker):
+        # Older tool_result sits BEFORE the last AI; it's covered by the
+        # API baseline and must not be double-counted.
+        fresh_tracker.record(
+            "agent",
+            {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110},
+            {"model_name": "stub"},
+        )
+        msgs = [
+            HumanMessage(content="hi"),
+            AIMessage(content="", tool_calls=[{"id": "1", "name": "r", "args": {}}]),
+            ToolMessage(content="y" * 10_000, tool_call_id="1"),   # old: already billed
+            AIMessage(content="done"),                             # last AI boundary
+        ]
+        # No pending content after the last AI → occupancy == baseline.
+        assert fresh_tracker.context_tokens_used(msgs) == 110
+
+    @pytest.mark.asyncio
+    async def test_cleared_tool_result_reduces_estimate_naturally(
+        self, isolated_home, fresh_tracker
+    ):
+        # _clear_old_tool_results replaces old content with "[Cleared]".
+        # Because context_tokens_used reads the CURRENT messages, a
+        # cleared tool_result (if pending — after last AI) naturally
+        # reports less. No separate hook needed.
+        msgs_full = [
+            HumanMessage(content="hi"),
+            AIMessage(content=""),
+            ToolMessage(content="y" * 10_000, tool_call_id="1"),
+        ]
+        msgs_cleared = [
+            HumanMessage(content="hi"),
+            AIMessage(content=""),
+            ToolMessage(content="[Cleared]", tool_call_id="1"),
+        ]
+        fresh_tracker.record(
+            "agent",
+            {"input_tokens": 100, "output_tokens": 10, "total_tokens": 110},
+            {"model_name": "stub"},
+        )
+        full = fresh_tracker.context_tokens_used(msgs_full)
+        cleared = fresh_tracker.context_tokens_used(msgs_cleared)
+        assert cleared < full
+        # cleared occupancy ≈ baseline (the short "[Cleared]" string is tiny).
+        assert cleared - 110 < 50
+
+    @pytest.mark.asyncio
+    async def test_sub_agent_tracker_isolated(self, isolated_home, fresh_tracker):
+        # _sub_agent_scope swaps usage._tracker for a fresh instance; the
+        # outer tracker's state is unchanged on exit.
+        from mini_cc.tools.builtins import _sub_agent_scope
+        fresh_tracker.record(
+            "agent",
+            {"input_tokens": 5000, "output_tokens": 500, "total_tokens": 5500},
+            {"model_name": "stub"},
+        )
+        before = fresh_tracker.context_tokens_used([AIMessage(content="x")])
+        assert before == 5500
+        with _sub_agent_scope("test"):
+            # Inside scope, usage._tracker is a different instance.
+            assert usage._tracker is not fresh_tracker
+            assert usage._tracker.context_tokens_used([]) == 0
+        # Back to the outer tracker unchanged.
+        assert usage._tracker is fresh_tracker
+        assert fresh_tracker.context_tokens_used([AIMessage(content="x")]) == before
+
+    @pytest.mark.asyncio
+    async def test_headroom_left_inverts_context_tokens_used(
+        self, isolated_home, fresh_tracker
+    ):
+        fresh_tracker.record(
+            "agent",
+            {"input_tokens": 50_000, "output_tokens": 500, "total_tokens": 50_500},
+            {"model_name": "deepseek-reasoner"},
+        )
+        msgs = [AIMessage(content="done")]
+        assert (
+            fresh_tracker.headroom_left(msgs)
+            == fresh_tracker.context_limit - fresh_tracker.context_tokens_used(msgs)
+        )
 
 
 # ---------------------------------------------------------------------------

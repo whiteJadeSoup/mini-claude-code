@@ -404,16 +404,16 @@ class StatusBar(Static):
         tracker = usage._tracker
         ctx_max = tracker.context_limit or 0
 
-        # Ask the engine for current occupancy — it combines record-accurate
-        # baseline with a char-based estimate so new tool_results landing
-        # between LLM calls are reflected immediately. `~` prefix signals
-        # the number is fully inferred (no real API record yet).
+        # Pull occupancy through the engine so the number is
+        # API-baseline + char estimate of pending messages (tool_results
+        # not yet sent). Engine walks api_view once per refresh — no
+        # running state to keep in sync. `~` prefix signals the number
+        # is fully inferred (no real API record yet).
         from mini_cc.engine.query_engine import get_engine
         try:
-            engine = get_engine()
-            ctx_used = engine.current_context_tokens(parent_id=None)
+            ctx_used = get_engine().current_context_tokens(parent_id=None)
         except Exception:  # noqa: BLE001
-            ctx_used = tracker.context_tokens_used()
+            ctx_used = 0
         estimate_prefix = "~" if not tracker._records and ctx_used > 0 else ""
 
         pct = (ctx_used / ctx_max * 100) if ctx_max else 0

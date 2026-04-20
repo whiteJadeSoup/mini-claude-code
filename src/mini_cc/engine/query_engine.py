@@ -418,6 +418,9 @@ class QueryEngine:
         if system_msg is not None:
             # Direct insert: consumers already saw this message at boot.
             # Re-dispatching would duplicate JSONL + re-render in UI.
+            # Tracker doesn't need a separate notify — context_tokens_used
+            # reads the store on demand and will pick up the re-inserted
+            # SystemPromptMessage next time it's called.
             self.store._messages.insert(0, system_msg)
 
         await self._dispatch(
@@ -479,18 +482,16 @@ class QueryEngine:
     ) -> list[BaseMessage]:
         """Called by AgentLoop before each LLM request.
 
-        Two-pass compact check:
-        1. Token-based: uses the last LLM call's recorded input token count.
-        2. Size-based: estimates the next call's actual payload size from
-           character count. Catches the case where a large tool result pushed
-           context over the limit between calls — the token-based check is
-           blind to tokens added after the last API response.
+        Runs _clear_old_tool_results to free space, then asks the tracker
+        whether we have enough headroom for one more round + compact. The
+        tracker's answer is API-baseline + a char estimate of messages
+        added since the last API response (mostly tool_results from the
+        current turn) — see UsageTracker.context_tokens_used.
         """
         self._clear_old_tool_results(parent_id)
         messages = self.store.api_view(parent_id=parent_id)
 
-        needs_compact = self._should_auto_compact() or self._payload_too_large(messages)
-        if needs_compact:
+        if self._should_auto_compact(messages):
             try:
                 await self.compact(auto=True)
                 messages = self.store.api_view(parent_id=parent_id)
@@ -518,11 +519,12 @@ class QueryEngine:
                 last_tool_asst_idx = i
         if last_tool_asst_idx <= 0:
             return
+        cleared_marker = "[Cleared]"
         for m in branch[:last_tool_asst_idx]:
             if isinstance(m, ToolResultMessage) and not m.content.startswith(
-                "[Cleared]"
+                cleared_marker
             ):
-                m.content = "[Cleared]"
+                m.content = cleared_marker
                 m.output = None
 
     # Headroom constants kept out of the condition so they're easy to tune.
@@ -532,46 +534,26 @@ class QueryEngine:
     _API_ROUND_RESERVE = 13_000         # one turn of thinking + response
     _COMPACT_CALL_RESERVE = 20_000      # buffer for compact's own LLM call
 
-    def _should_auto_compact(self) -> bool:
-        """Compact when projected next input would leave less than ~53k headroom."""
-        headroom = self._COMPACT_SUMMARY_RESERVE + self._API_ROUND_RESERVE + self._COMPACT_CALL_RESERVE
-        return (
-            usage._tracker.projected_next_input() + headroom
-            > usage._tracker.context_limit
-        )
+    def _should_auto_compact(self, messages: list[BaseMessage]) -> bool:
+        """Compact when less than ~53k tokens of headroom remain.
 
-    def _payload_too_large(self, messages: list[BaseMessage]) -> bool:
-        """Same condition, but using character-based token estimate.
-
-        Catches the gap where a large tool result was added after the last
-        LLM call — projected_next_input() won't see those tokens yet.
-        Uses the shared _estimate_message_chars so tool_call args (which
-        don't live in `content`) are counted; missing them lets `Edit`-style
-        calls with large `new_string` args slip past this check.
+        The reserve covers: room for compact's summary output, one API
+        round's overhead, and a safety margin so compact's own LLM call
+        doesn't fail on first attempt due to token-estimation drift.
         """
-        estimated = sum(_estimate_message_chars(m) for m in messages) // 2
-        headroom = self._COMPACT_SUMMARY_RESERVE + self._API_ROUND_RESERVE + self._COMPACT_CALL_RESERVE
-        return estimated + headroom > usage._tracker.context_limit
+        reserve = self._COMPACT_SUMMARY_RESERVE + self._API_ROUND_RESERVE + self._COMPACT_CALL_RESERVE
+        return usage._tracker.headroom_left(messages) < reserve
 
     def current_context_tokens(self, parent_id: str | None = None) -> int:
-        """Tokens currently held in history — what the next LLM call will send.
+        """Convenience wrapper for UI callers that don't already hold api_view.
 
-        Two signals, whichever is larger:
-          1. `last_input + last_output` — API-accurate baseline right after a
-             call completes. Stale as soon as any new content lands in the
-             store (tool_result, next user message, compact summary).
-          2. char-based estimate of the current api_view — catches content
-             added since the last LLM response, which signal 1 is blind to.
-
-        Context occupancy should never under-report. Taking the max keeps the
-        footer honest when the real value lies between the two.
+        `/context` and the TUI status bar read this — they don't want to
+        assemble a LangChain message list themselves. Tracker logic stays
+        pure (no store reference) by funnelling through here.
         """
-        messages = self.store.api_view(parent_id=parent_id)
-        char_est = sum(_estimate_message_chars(m) for m in messages) // 2
-        if usage._tracker._records:
-            r = usage._tracker._records[-1]
-            return max(r.input + r.output, char_est)
-        return char_est
+        return usage._tracker.context_tokens_used(
+            self.store.api_view(parent_id=parent_id)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -672,25 +654,6 @@ MARKER_TEXT = (
 )
 
 
-def _estimate_message_chars(m: BaseMessage) -> int:
-    """Char-count estimate matching what _format_history_for_summary renders.
-
-    Includes tool_call args (which don't live in `content`) because in
-    agentic workflows they're often the single largest payload — missing
-    them makes budget checks optimistic by orders of magnitude.
-    """
-    import json as _json
-
-    total = len(str(getattr(m, "content", "")))
-    for tc in (getattr(m, "tool_calls", None) or []):
-        total += len(tc.get("name", ""))
-        total += len(_json.dumps(tc.get("args", {}), ensure_ascii=False))
-    # Per-message formatting prefix ("Human: ", "Assistant: ", "  → ")
-    # — 16 chars is a generous upper bound covering all cases.
-    total += 16
-    return total
-
-
 class ApiRound(BaseModel):
     """One logical turn in the conversation.
 
@@ -711,7 +674,7 @@ class ApiRound(BaseModel):
 
     @property
     def size_chars(self) -> int:
-        return sum(_estimate_message_chars(m) for m in self.messages)
+        return sum(usage.estimate_chars(m) for m in self.messages)
 
 
 def _group_by_api_round(messages: list[BaseMessage]) -> list[ApiRound]:
