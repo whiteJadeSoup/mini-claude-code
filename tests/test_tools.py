@@ -10,7 +10,7 @@ from mini_cc.tools.base import (
     RunSkillOutput, SubTaskOutput,
     MiniTool, register, get_tool, _REGISTRY, output_from_dict,
 )
-import mini_cc.tools.builtins  # noqa: F401 — ensures all subclasses are registered
+import mini_cc.tools  # noqa: F401 — ensures all subclasses are registered
 from mini_cc.engine.messages import ToolResultMessage
 
 

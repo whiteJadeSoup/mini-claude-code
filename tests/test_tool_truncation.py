@@ -119,7 +119,7 @@ class TestAgentLoopTruncation:
         # The shipped execute_command tool already does this, so we don't need
         # to monkeypatch get_tool — just verify end-to-end behaviour with the
         # real tool module imported below.
-        import mini_cc.tools.builtins  # noqa: F401 — triggers registry
+        import mini_cc.tools  # noqa: F401 — triggers registry
 
         tc = {"id": "tc-integration", "name": "execute_command", "args": {"command": "x"}}
         first = AIMessage(

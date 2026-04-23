@@ -7,7 +7,7 @@ import os
 from langchain_openai import ChatOpenAI
 
 from mini_cc import prompts
-import mini_cc.tools.builtins  # noqa: F401 — side-effect: registers all MiniTools
+import mini_cc.tools  # noqa: F401 — side-effect: registers all MiniTools
 from mini_cc.tools.base import get_tool
 from mini_cc.skills import _skill_manager
 
