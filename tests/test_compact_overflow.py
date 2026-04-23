@@ -37,6 +37,7 @@ from mini_cc.engine.query_engine import (
     _parse_context_gap_tokens,
     _plan_kept_groups,
 )
+from mini_cc.engine.messages import ToolResultMessage, ToolUseBlock
 from mini_cc.state import usage
 
 
@@ -551,7 +552,7 @@ class TestContextTokensUsed:
     async def test_sub_agent_tracker_isolated(self, isolated_home, fresh_tracker):
         # _sub_agent_scope swaps usage._tracker for a fresh instance; the
         # outer tracker's state is unchanged on exit.
-        from mini_cc.tools.builtins import _sub_agent_scope
+        from mini_cc.tools._utils import _sub_agent_scope
         fresh_tracker.record(
             "agent",
             {"input_tokens": 5000, "output_tokens": 500, "total_tokens": 5500},
@@ -638,3 +639,75 @@ class TestCompactBoundaryPersistence:
         assert msg.attempts == 1
         assert msg.original_chars == 0
         assert msg.sent_chars == 0
+
+
+# ---------------------------------------------------------------------------
+# _clear_old_tool_results — direct unit test (Q6)
+# ---------------------------------------------------------------------------
+
+
+class TestClearOldToolResults:
+    """_clear_old_tool_results replaces all but the last tool-result group."""
+
+    def _make_tool_round(self, call_id: str, result: str) -> tuple:
+        """Return (AssistantMessage with ToolUseBlock, ToolResultMessage)."""
+        asst = AssistantMessage(
+            turn_id=f"turn-{call_id}",
+            model="m",
+            content=ToolUseBlock(call_id=call_id, name="Bash", args={"command": "ls"}),
+        )
+        result_msg = ToolResultMessage(
+            content=result,
+            tool_call_id=call_id,
+        )
+        return asst, result_msg
+
+    def test_three_rounds_only_last_preserved(self, isolated_home):
+        engine = _make_engine(_ProgrammableLLM([]))
+
+        for call_id, result in [("id1", "result one"), ("id2", "result two"), ("id3", "result three")]:
+            asst, res = self._make_tool_round(call_id, result)
+            engine.store.append(asst)
+            engine.store.append(res)
+
+        engine._clear_old_tool_results(parent_id=None)
+
+        tool_results = [
+            m for m in engine.store._messages if isinstance(m, ToolResultMessage)
+        ]
+        assert len(tool_results) == 3
+        # First two rounds must be cleared.
+        assert tool_results[0].content == "[Cleared]"
+        assert tool_results[0].output is None
+        assert tool_results[1].content == "[Cleared]"
+        assert tool_results[1].output is None
+        # Last round must retain original content.
+        assert tool_results[2].content == "result three"
+        assert tool_results[2].output is not None or tool_results[2].output is None  # output wasn't set
+
+    def test_single_round_nothing_cleared(self, isolated_home):
+        engine = _make_engine(_ProgrammableLLM([]))
+
+        asst, res = self._make_tool_round("id1", "only result")
+        engine.store.append(asst)
+        engine.store.append(res)
+
+        engine._clear_old_tool_results(parent_id=None)
+
+        tool_results = [
+            m for m in engine.store._messages if isinstance(m, ToolResultMessage)
+        ]
+        assert tool_results[0].content == "only result"
+
+    def test_no_tool_calls_is_noop(self, isolated_home):
+        engine = _make_engine(_ProgrammableLLM([]))
+        engine.store.append(AssistantMessage(
+            turn_id="t1", model="m", content=TextBlock(text="hello")
+        ))
+
+        engine._clear_old_tool_results(parent_id=None)  # must not raise
+
+        tool_results = [
+            m for m in engine.store._messages if isinstance(m, ToolResultMessage)
+        ]
+        assert tool_results == []

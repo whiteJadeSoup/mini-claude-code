@@ -169,6 +169,17 @@ TOOL_CONTENT_MAX_CHARS: int = 30_000     # trigger threshold (~15k tokens)
 TOOL_CONTENT_PREVIEW_CHARS: int = 1_024  # kept in the API-facing content
 
 
+def _sanitize_preview(text: str) -> str:
+    """Strip control characters that can cause API 400 errors.
+
+    Keeps printable ASCII/Unicode plus whitespace (tab, newline, carriage
+    return). Replaces other C0/C1 control chars with the replacement char.
+    These can appear in raw command output (ANSI escapes, terminal codes).
+    """
+    import re
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "\ufffd", text)
+
+
 def truncate_tool_content(content: str, tool_call_id: str) -> str:
     """Offload oversized tool output; return API-safe preview."""
     if len(content) <= TOOL_CONTENT_MAX_CHARS:
@@ -187,14 +198,14 @@ def truncate_tool_content(content: str, tool_call_id: str) -> str:
         # If the disk write fails we'd rather return the first preview of
         # the original than hand the API a broken path. Caller sees a
         # preview with an explanatory note.
-        preview = content[:TOOL_CONTENT_PREVIEW_CHARS]
+        preview = _sanitize_preview(content[:TOOL_CONTENT_PREVIEW_CHARS])
         return (
             f"[Tool result was {len(content):,} chars — failed to spill to "
             f"disk ({type(e).__name__}: {e}). Showing first "
             f"{TOOL_CONTENT_PREVIEW_CHARS:,} chars only.]\n\n{preview}"
         )
 
-    preview = content[:TOOL_CONTENT_PREVIEW_CHARS]
+    preview = _sanitize_preview(content[:TOOL_CONTENT_PREVIEW_CHARS])
     return (
         f"[Tool result too large ({len(content):,} chars) — truncated. "
         f"Full content saved to {path}. "
