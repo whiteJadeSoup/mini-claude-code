@@ -79,6 +79,27 @@ def build_system_prompt(
     sections.append("")
     sections.append(_priority_table(available_tools))
 
+    if has_grep and has_glob:
+        # Discovery-first workflow guard.
+        # Empirical: deepseek-v4-pro routinely guesses file names from training
+        # data ("there's probably a memory_tools.py"), gets back-to-back NOT
+        # FOUND, then panics into shell `ls -laR` / `grep -rn`. The
+        # ALWAYS/NEVER directives above don't fire because the model doesn't
+        # think it's "searching" — it thinks it's "recovering". This block
+        # gives the recovery path an explicit name.
+        sections.append(
+            "## Discovery-first workflow\n"
+            "Before reading or editing a file you have not yet seen, confirm "
+            "the path exists with glob — DO NOT guess names from project "
+            "conventions or your training data. If file_read returns "
+            "`File not found`, your next call MUST be glob (to enumerate "
+            "real paths) or grep (to locate by content). DO NOT fall back "
+            "to execute_command(`ls -R`, `find`, `grep -rn`) — those are "
+            "the same operations as glob/grep, just slower, noisier, and "
+            "without the head_limit budget. The dedicated tools are the "
+            "recovery path, not the last resort."
+        )
+
     sections.append(
         "## file_read\n"
         "Use file_read to read text files with cat -n line numbers. Default "
