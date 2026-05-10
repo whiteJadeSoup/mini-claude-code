@@ -71,6 +71,15 @@ class FileReadTool(MiniTool):
             ))
 
         # 4. Dedup check (G6) — only against entries that came from a prior Read.
+        # On hit, re-emit the cached content rather than a stub. The original
+        # CC-style stub (`refer to the earlier file_read tool_result`) only
+        # works if that earlier tool_result is still readable; mini-cc's engine
+        # `_clear_old_tool_results` aggressively wipes earlier tool_results to
+        # `[Cleared]` before every LLM call (verified via diagnostic logging,
+        # 2026-05-10), so the stub points at deleted content and the LLM is
+        # forced to fall back to `cat`. Returning content keeps the tool
+        # self-contained: the LLM always has the file in front of it,
+        # regardless of how aggressive the clear hook is.
         mtime_ms = int(st.st_mtime * 1000)
         entry = file_read_state._state.get(p)
         if (
@@ -80,7 +89,30 @@ class FileReadTool(MiniTool):
             and entry.limit == limit
             and entry.mtime_ms == mtime_ms
         ):
-            return FileReadOutput(path=path, unchanged=True)
+            # Reformat from cache (skip disk read + size/budget gates — entry
+            # was admitted previously, so we know it fits). `unchanged=True`
+            # becomes a UI-only annotation; to_api_str returns content.
+            cached_lines = entry.content.splitlines()
+            total = len(cached_lines)
+            start = max(0, offset - 1)
+            end = min(total, start + limit)
+            sliced = cached_lines[start:end]
+            sliced = [
+                (line[:MAX_LINE_CHARS] + LINE_TRUNCATED_SUFFIX) if len(line) > MAX_LINE_CHARS else line
+                for line in sliced
+            ]
+            formatted = "\n".join(
+                f"{idx + offset:>6}\t{line}" for idx, line in enumerate(sliced)
+            )
+            return FileReadOutput(
+                path=path,
+                content=formatted,
+                total_lines=total,
+                start_line=offset,
+                returned_lines=len(sliced),
+                truncated_by_limit=(end < total),
+                unchanged=True,
+            )
 
         # 5. Read with UTF-8 + CRLF normalize (OQ1) — non-UTF-8 → error.
         try:

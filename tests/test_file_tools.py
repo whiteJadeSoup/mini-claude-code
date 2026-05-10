@@ -329,8 +329,13 @@ def test_T20_dedup_hit_on_repeat_read(workdir, fr):
     out1 = _arun(fr.execute(path="a.txt"))
     assert isinstance(out1, FileReadOutput) and not out1.unchanged
     out2 = _arun(fr.execute(path="a.txt"))
+    # `unchanged=True` is now a UI-only flag; to_api_str returns content so
+    # the LLM never gets a stub that depends on an earlier tool_result still
+    # being readable (mini-cc's _clear_old_tool_results would have wiped it).
     assert isinstance(out2, FileReadOutput) and out2.unchanged
-    assert "File unchanged since last read" in out2.to_api_str()
+    assert "     1\thello" in out2.to_api_str()
+    # Content must be identical between fresh and dedup-hit reads.
+    assert out2.to_api_str() == out1.to_api_str()
 
 
 def test_T21_dedup_misses_on_different_limit(workdir, fr):

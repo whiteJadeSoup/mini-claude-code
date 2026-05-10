@@ -114,11 +114,14 @@ class FileReadOutput(ToolOutput):
         # Plain text only — no <system-reminder> tag (CC uses it because its
         # system prompt teaches the LLM how to read the tag; mini-cc's prompts.py
         # has no such convention, so wrapping in the tag would invent a protocol.)
-        if self.unchanged:
-            # Aligned with CC `FILE_UNCHANGED_STUB` (FileReadTool/prompt.ts:7-8)
-            return ("File unchanged since last read. The content from the earlier "
-                    "file_read tool_result in this conversation is still current — "
-                    "refer to that instead of re-reading.")
+        #
+        # The `unchanged` flag is now a UI-only annotation — the API path
+        # always returns content. CC's `FILE_UNCHANGED_STUB` ("refer to the
+        # earlier tool_result") relies on that earlier result still being
+        # in context, but mini-cc's engine clears old tool_results on every
+        # turn (see _clear_old_tool_results); the stub would point at
+        # `[Cleared]`. Re-emitting content keeps the dedup tool-IO-cheap
+        # (no disk re-read) without breaking the LLM's view.
         if self.total_lines == 0:
             return f"File is empty: {self.path}"
         if self.returned_lines == 0:
