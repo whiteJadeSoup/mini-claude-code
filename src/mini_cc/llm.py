@@ -11,7 +11,7 @@ import mini_cc.tools  # noqa: F401 — side-effect: registers all MiniTools
 from mini_cc.tools.base import get_tool
 from mini_cc.skills import _skill_manager
 
-_MODEL_NAME = "deepseek-reasoner"
+_MODEL_NAME = "deepseek-v4-pro"
 
 
 def _build_system_prompt() -> str:
