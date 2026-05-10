@@ -448,3 +448,65 @@ class TestToolResultMessageOutput:
         assert dumped["output"]["type"] == "command"
         assert dumped["output"]["stdout"] == "hi"
         assert dumped["output"]["returncode"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Validation error formatting (LLM-facing)
+# ---------------------------------------------------------------------------
+
+class _StubFRTool(MiniTool):
+    """file_read-like signature for testing validation error mapping."""
+    name = "file_read"
+    description = "stub"
+    prompt = "stub"
+
+    async def _run(self, path: str, offset: int = 1, limit: int = 2000):  # type: ignore[override]
+        return ToolErrorOutput(message="not invoked in tests")
+
+
+class TestFmtValidationError:
+    def setup_method(self):
+        self.tool = _StubFRTool()
+        self.lc = self.tool.as_langchain_tool()
+
+    def _invoke_with(self, args: dict) -> str:
+        """Trigger StructuredTool's validation path; return its rendered string."""
+        import asyncio
+        return asyncio.run(self.lc.ainvoke(args))
+
+    def test_missing_required_arg(self):
+        msg = self._invoke_with({})  # no path
+        assert "missing required argument: `path`" in msg
+        assert "(str)" in msg
+        # Concrete retry example with sample value
+        assert 'file_read(path="..."' in msg
+        # Full signature for context
+        assert "file_read(path: str" in msg
+        # No pydantic jargon
+        assert "Field required" not in msg
+
+    def test_wrong_type(self):
+        msg = self._invoke_with({"path": "x", "offset": "abc"})
+        assert "wrong type for `offset`" in msg
+        assert "expected int" in msg
+        # Got-value description with type name
+        assert "got str" in msg
+        # Recovery example
+        assert 'file_read(path="..."' in msg
+
+    def test_multi_error_uses_fallback_format(self):
+        # Wrong type AND missing required (offset wrong type, no path)
+        msg = self._invoke_with({"offset": "abc"})
+        assert "Full signature" in msg
+        # Either single-error tailored or fallback list — both must
+        # produce actionable text. Accept any of the recovery shapes.
+        assert ("argument validation failed" in msg
+                or "missing required argument" in msg
+                or "wrong type for" in msg)
+
+    def test_signature_always_present(self):
+        for args in [{}, {"path": "x", "offset": "abc"}]:
+            msg = self._invoke_with(args)
+            assert ("Full signature: file_read(path: str, offset: int = 1, "
+                    "limit: int = 2000)") in msg
+

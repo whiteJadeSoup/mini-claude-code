@@ -30,7 +30,7 @@ from mini_cc.engine.messages import (
     TextBlock,
     UserMessage,
 )
-from mini_cc.engine.query_engine import (
+from mini_cc.engine.compact import (
     ApiRound,
     MARKER_TEXT,
     _chars_to_shed_on_retry,

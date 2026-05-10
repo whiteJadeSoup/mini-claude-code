@@ -1,333 +1,42 @@
-"""MiniTool base framework: structured Output types, render protocol, registry."""
+"""MiniTool framework — abstract base + registry + render protocol.
+
+Concrete output types live in `output_types.py`; oversized-result spilling
+lives in `truncate.py`. This file re-exports both for backward compat:
+existing `from mini_cc.tools.base import FileReadOutput` calls keep working.
+"""
+from __future__ import annotations
+
 import inspect
 from abc import ABC, abstractmethod
-from typing import Any, ClassVar, Literal
+from typing import Any
 
-from pydantic import BaseModel, ValidationError, model_validator
 from langchain_core.tools import StructuredTool
+from pydantic import ValidationError
 
-
-# ---------------------------------------------------------------------------
-# Output base + concrete types
-# ---------------------------------------------------------------------------
-
-class ToolOutput(BaseModel):
-    # "base" is this class's own sentinel; __init_subclass__ skips it so the
-    # base class is never auto-registered — output_from_dict falls back to it
-    # for unknown/missing type keys, which is the correct behavior.
-    type: str = "base"
-    is_error: bool = False
-    _registry: ClassVar[dict[str, Any]] = {}
-
-    @classmethod
-    def __pydantic_init_subclass__(cls, **kw: Any) -> None:
-        # __pydantic_init_subclass__ fires after Pydantic's metaclass has fully
-        # processed the subclass — cls.model_fields already reflects the override.
-        # Plain __init_subclass__ fires too early: it sees the parent's type field.
-        super().__pydantic_init_subclass__(**kw)
-        field = cls.model_fields.get("type")
-        if field is not None and field.default and field.default != "base":
-            ToolOutput._registry[field.default] = cls
-
-    def to_api_str(self) -> str:
-        return self.model_dump_json()
-
-
-class ToolErrorOutput(ToolOutput):
-    type: Literal["error"] = "error"
-    is_error: bool = True
-    message: str
-
-    def to_api_str(self) -> str:
-        return self.message
-
-
-class CommandOutput(ToolOutput):
-    type: Literal["command"] = "command"
-    stdout: str
-    returncode: int
-
-    @model_validator(mode="after")
-    def _derive_is_error(self) -> "CommandOutput":
-        self.is_error = self.returncode != 0
-        return self
-
-    def to_api_str(self) -> str:
-        return self.stdout if self.stdout else "(no output)"
-
-
-class FileWriteOutput(ToolOutput):
-    type: Literal["file_write"] = "file_write"
-    path: str
-    # Default keeps older JSONL records (pre-PR shape: {type, path, bytes_written})
-    # deserializable after this change — same idiom as CompactBoundaryMessage's
-    # audit fields in engine/messages.py:101-107. New code always sets it explicitly.
-    operation: Literal["create", "update"] = "update"
-    bytes_written: int
-    # Rich data for UI v2+ — NOT exposed via to_api_str
-    content: str = ""
-    original_content: str | None = None       # None for create
-
-    def to_api_str(self) -> str:
-        # Aligned with CC FileWriteTool.ts:418-432
-        if self.operation == "create":
-            return f"File created successfully at: {self.path}"
-        return f"The file {self.path} has been updated successfully."
-
-
-class FileEditOutput(ToolOutput):
-    type: Literal["file_edit"] = "file_edit"
-    path: str
-    replaced: bool
-    replace_count: int = 0
-    # Rich data for UI v2+ — NOT exposed via to_api_str
-    old_string: str = ""
-    new_string: str = ""
-    original_content: str = ""
-
-    @model_validator(mode="after")
-    def _derive_is_error(self) -> "FileEditOutput":
-        self.is_error = not self.replaced
-        return self
-
-    def to_api_str(self) -> str:
-        # Aligned with CC FileEditTool.ts:581-593
-        if not self.replaced:
-            return f"Error: edit not applied to {self.path}"
-        if self.replace_count > 1:
-            return (f"The file {self.path} has been updated. "
-                    f"All occurrences were successfully replaced.")
-        return f"The file {self.path} has been updated successfully."
-
-
-class FileReadOutput(ToolOutput):
-    type: Literal["file_read"] = "file_read"
-    path: str
-    content: str = ""                # cat -n line-numbered text; empty when unchanged=True
-    total_lines: int = 0
-    start_line: int = 1              # 1-based starting line of this slice
-    returned_lines: int = 0
-    truncated_by_limit: bool = False
-    unchanged: bool = False          # G6 dedup hit (path/offset/limit/mtime all unchanged)
-
-    def to_api_str(self) -> str:
-        # Plain text only — no <system-reminder> tag (CC uses it because its
-        # system prompt teaches the LLM how to read the tag; mini-cc's prompts.py
-        # has no such convention, so wrapping in the tag would invent a protocol.)
-        #
-        # The `unchanged` flag is now a UI-only annotation — the API path
-        # always returns content. CC's `FILE_UNCHANGED_STUB` ("refer to the
-        # earlier tool_result") relies on that earlier result still being
-        # in context, but mini-cc's engine clears old tool_results on every
-        # turn (see _clear_old_tool_results); the stub would point at
-        # `[Cleared]`. Re-emitting content keeps the dedup tool-IO-cheap
-        # (no disk re-read) without breaking the LLM's view.
-        if self.total_lines == 0:
-            return f"File is empty: {self.path}"
-        if self.returned_lines == 0:
-            return (f"File has {self.total_lines} lines; "
-                    f"offset {self.start_line} is beyond the end.")
-        return self.content
-
-
-class GrepOutput(ToolOutput):
-    type: Literal["grep"] = "grep"
-    mode: Literal["content", "files_with_matches", "count"]
-    num_files: int
-    filenames: list[str] = []                # Empty in content/count modes
-    content: str = ""                        # Set in content/count modes
-    num_matches: int = 0                     # Set in count mode (sum across files)
-    applied_limit: int | None = None         # Filled only when truncation kicked in
-    applied_offset: int = 0
-
-    def to_api_str(self) -> str:
-        # Aligned with CC GrepTool.ts:254-308 mapToolResultToToolResultBlockParam
-        if self.mode == "content":
-            body = self.content or "No matches found"
-            paging = self._paging_hint()
-            return f"{body}\n\n{paging}" if paging else body
-        if self.mode == "count":
-            paging = self._paging_hint()
-            files_word = "file" if self.num_files == 1 else "files"
-            occ_word = "occurrence" if self.num_matches == 1 else "occurrences"
-            summary = (
-                f"\n\nFound {self.num_matches} total {occ_word} "
-                f"across {self.num_files} {files_word}."
-            )
-            if paging:
-                summary += f" with pagination = {paging}"
-            return (self.content or "No matches found") + summary
-        # files_with_matches
-        if self.num_files == 0:
-            return "No files found"
-        paging = self._paging_hint()
-        files_word = "file" if self.num_files == 1 else "files"
-        header = f"Found {self.num_files} {files_word}"
-        if paging:
-            header += f" {paging}"
-        return f"{header}\n" + "\n".join(self.filenames)
-
-    def _paging_hint(self) -> str:
-        parts = []
-        if self.applied_limit is not None:
-            parts.append(f"limit: {self.applied_limit}")
-        if self.applied_offset:
-            parts.append(f"offset: {self.applied_offset}")
-        return ", ".join(parts)
-
-
-class GlobOutput(ToolOutput):
-    type: Literal["glob"] = "glob"
-    filenames: list[str] = []        # CWD-relative paths
-    num_files: int
-    truncated: bool = False          # True when matches > GLOB_CAP
-    duration_ms: int
-
-    def to_api_str(self) -> str:
-        # Aligned with CC GlobTool.ts:177-197
-        if not self.filenames:
-            return "No files found"
-        body = "\n".join(self.filenames)
-        if self.truncated:
-            body += "\n(Results are truncated. Consider using a more specific path or pattern.)"
-        return body
-
-
-class TodoPlanOutput(ToolOutput):
-    type: Literal["todo_plan"] = "todo_plan"
-    count: int
-    rendered: str
-
-    def to_api_str(self) -> str:
-        return self.rendered
-
-
-class TodoUpdateOutput(ToolOutput):
-    type: Literal["todo_update"] = "todo_update"
-    item: str
-    status: str
-    rendered: str
-
-    def to_api_str(self) -> str:
-        return self.rendered
-
-
-class TaskPlanOutput(ToolOutput):
-    type: Literal["task_plan"] = "task_plan"
-    count: int
-    rendered: str
-
-    def to_api_str(self) -> str:
-        return self.rendered
-
-
-class TaskUpdateOutput(ToolOutput):
-    type: Literal["task_update"] = "task_update"
-    task_id: str
-    status: str
-    rendered: str
-
-    def to_api_str(self) -> str:
-        return self.rendered
-
-
-class RunSkillOutput(ToolOutput):
-    type: Literal["run_skill"] = "run_skill"
-    skill_name: str
-    result: str
-
-    def to_api_str(self) -> str:
-        return self.result
-
-
-class SubTaskOutput(ToolOutput):
-    type: Literal["sub_task"] = "sub_task"
-    result: str
-
-    def to_api_str(self) -> str:
-        return self.result
-
-
-def output_from_dict(d: dict) -> ToolOutput:
-    """Reconstruct the correct ToolOutput subclass from a serialized dict.
-
-    Subclasses self-register via __init_subclass__ when the module is imported.
-    Unknown or missing type keys fall back to the ToolOutput base class.
-    """
-    cls = ToolOutput._registry.get(d.get("type", ""), ToolOutput)
-    return cls.model_validate(d)
-
-
-# ---------------------------------------------------------------------------
-# Oversized tool-result offload
-# ---------------------------------------------------------------------------
-#
-# A single Read on a large file, or a Bash command with runaway output, can
-# produce a tool result bigger than the headroom we reserve for a whole
-# compact round. Sending it verbatim to the API wastes window on content
-# the model rarely needs in full. Instead:
-#
-#   - Full content → disk (`persistence.tool_result_path(tool_call_id)`)
-#     so the user can inspect it offline and the model can Read() it if
-#     the preview turns out to be insufficient.
-#   - API `content` → a short marker explaining what happened + the on-disk
-#     path + the first PREVIEW_CHARS of the original, enough for the model
-#     to recognise the output.
-#   - UI `output` (the ToolOutput instance) is NOT touched — the TUI still
-#     renders the full result for the user; this split is purely about what
-#     crosses the API boundary.
-
-TOOL_CONTENT_MAX_CHARS: int = 30_000     # trigger threshold (~15k tokens)
-TOOL_CONTENT_PREVIEW_CHARS: int = 1_024  # kept in the API-facing content
-
-
-def _sanitize_preview(text: str) -> str:
-    """Strip control characters that can cause API 400 errors.
-
-    Keeps printable ASCII/Unicode plus whitespace (tab, newline, carriage
-    return). Replaces other C0/C1 control chars with the replacement char.
-    These can appear in raw command output (ANSI escapes, terminal codes).
-    """
-    import re
-    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "\ufffd", text)
-
-
-def truncate_tool_content(content: str, tool_call_id: str) -> str:
-    """Offload oversized tool output; return API-safe preview."""
-    if len(content) <= TOOL_CONTENT_MAX_CHARS:
-        return content
-
-    # Lazy import: base.py sits beneath consumers in the dep graph, and
-    # persistence pulls mini_cc.engine.messages transitively. Importing at
-    # call time keeps this module cheap to load.
-    from mini_cc.consumers import persistence
-
-    path = persistence.tool_result_path(tool_call_id)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-    except OSError as e:
-        # If the disk write fails we'd rather return the first preview of
-        # the original than hand the API a broken path. Caller sees a
-        # preview with an explanatory note.
-        preview = _sanitize_preview(content[:TOOL_CONTENT_PREVIEW_CHARS])
-        return (
-            f"[Tool result was {len(content):,} chars — failed to spill to "
-            f"disk ({type(e).__name__}: {e}). Showing first "
-            f"{TOOL_CONTENT_PREVIEW_CHARS:,} chars only.]\n\n{preview}"
-        )
-
-    preview = _sanitize_preview(content[:TOOL_CONTENT_PREVIEW_CHARS])
-    # Spill path lives under ~/.minicc/projects/, OUTSIDE the project sandbox.
-    # file_read would reject it via safe_path() — direct LLM at execute_command
-    # which has no sandbox restriction.
-    return (
-        f"[Tool result too large ({len(content):,} chars) — truncated. "
-        f"Full content saved to {path}. "
-        f"Run execute_command('cat \"{path}\"') if you need more than the preview below.]\n\n"
-        f"--- First {TOOL_CONTENT_PREVIEW_CHARS:,} chars ---\n"
-        f"{preview}"
-    )
+from mini_cc.tools._output_base import ToolOutput
+# Re-export concrete output types so external imports continue to work.
+# noqa: F401 below is the contract: these names are re-exported, not unused.
+from mini_cc.tools.output_types import (  # noqa: F401
+    CommandOutput,
+    FileEditOutput,
+    FileReadOutput,
+    FileWriteOutput,
+    GlobOutput,
+    GrepOutput,
+    RunSkillOutput,
+    SubTaskOutput,
+    TaskPlanOutput,
+    TaskUpdateOutput,
+    TodoPlanOutput,
+    TodoUpdateOutput,
+    ToolErrorOutput,
+    output_from_dict,
+)
+from mini_cc.tools.truncate import (  # noqa: F401
+    TOOL_CONTENT_MAX_CHARS,
+    TOOL_CONTENT_PREVIEW_CHARS,
+    truncate_tool_content,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -420,13 +129,65 @@ class MiniTool(ABC):
         )
 
     def _fmt_validation_error(self, e: ValidationError) -> str:
-        # Uses inspect.signature directly rather than building a new StructuredTool
-        # instance, which would be wasteful on every validation-error call.
+        """Convert pydantic ValidationError into actionable LLM-facing text.
+
+        Goal: replace pydantic's "Field required" / "Input should be a valid
+        integer" messages — which read like internal jargon — with the
+        three-segment recovery pattern (state + impact + next-step) the rest
+        of mini-cc's tool errors follow.
+
+        Single-error path is given a tailored message per error type
+        (`missing` / `*_type` / `extra_forbidden`); multi-error or unknown
+        types fall back to a structured list. Every branch ends with the
+        full signature + a concrete retry example so the LLM can self-correct
+        on the next turn instead of falling back to execute_command.
+        """
+        errs = e.errors()
         sig_str = self.args_schema_description()
-        fields = "; ".join(
-            f"{err['loc'][0]}: {err['msg']}" for err in e.errors()
+        retry_example = self._retry_example()
+
+        if len(errs) == 1:
+            err = errs[0]
+            loc = err["loc"][0] if err.get("loc") else "<unknown>"
+            etype = err.get("type", "")
+            if etype == "missing":
+                ftype = self._field_type_label(loc)
+                return (
+                    f"{self.name} missing required argument: `{loc}`"
+                    f"{f' ({ftype})' if ftype else ''}. "
+                    f"Retry with the argument included, e.g. {retry_example}.\n\n"
+                    f"Full signature: {sig_str}"
+                )
+            if etype.endswith("_type") or etype.endswith("_parsing"):
+                expected = self._field_type_label(loc) or "a different type"
+                got = self._describe_input(err.get("input"))
+                return (
+                    f"{self.name} got wrong type for `{loc}`: expected {expected}"
+                    f"{f', got {got}' if got else ''}. "
+                    f"Retry with the correct type, e.g. {retry_example}.\n\n"
+                    f"Full signature: {sig_str}"
+                )
+            if etype == "extra_forbidden":
+                hint = self._did_you_mean(str(loc))
+                return (
+                    f"{self.name} received unknown argument: `{loc}`"
+                    f"{hint}. "
+                    f"Drop arguments not in the signature and retry, "
+                    f"e.g. {retry_example}.\n\n"
+                    f"Full signature: {sig_str}"
+                )
+
+        # Fallback: multi-error or unrecognised single-error type.
+        fields = "\n".join(
+            f"  · {err['loc'][0] if err.get('loc') else '<unknown>'}: {err['msg']}"
+            for err in errs
         )
-        return f"Tool call error: {sig_str}\nValidation: {fields}"
+        return (
+            f"{self.name} argument validation failed:\n{fields}\n\n"
+            f"Full signature: {sig_str}\n"
+            f"Retry the call with all required arguments and correct types, "
+            f"e.g. {retry_example}."
+        )
 
     def args_schema_description(self) -> str:
         sig = inspect.signature(self._run)
@@ -439,6 +200,81 @@ class MiniTool(ABC):
             else:
                 parts.append(f"{pname}: {type_str} = {p.default!r}")
         return f"{self.name}({', '.join(parts)})"
+
+    def _field_type_label(self, name: str) -> str:
+        """Human-readable type for a parameter (e.g. 'str', 'int')."""
+        sig = inspect.signature(self._run)
+        p = sig.parameters.get(str(name))
+        if p is None or p.annotation is inspect.Parameter.empty:
+            return ""
+        ann = p.annotation
+        return getattr(ann, "__name__", None) or str(ann)
+
+    def _retry_example(self) -> str:
+        """Build a short keyword-style retry example using sample values
+        derived from each REQUIRED parameter's type annotation."""
+        sig = inspect.signature(self._run)
+        kv = []
+        for pname, p in sig.parameters.items():
+            if p.default is not inspect.Parameter.empty:
+                continue   # optional — skip in example
+            sample = self._sample_for_annotation(p.annotation)
+            kv.append(f'{pname}={sample}')
+        return f"{self.name}({', '.join(kv)})" if kv else f"{self.name}()"
+
+    @staticmethod
+    def _sample_for_annotation(ann: Any) -> str:
+        """Inline a literal of the right shape so the LLM has a concrete
+        template to copy. Defaults to '<value>' for unknown annotations."""
+        type_name = getattr(ann, "__name__", None) or str(ann)
+        return {
+            "str": '"..."',
+            "int": "1",
+            "bool": "True",
+            "float": "1.0",
+            "list": "[]",
+            "dict": "{}",
+        }.get(type_name, "<value>")
+
+    @staticmethod
+    def _describe_input(v: Any) -> str:
+        """Compact description of bad input for the error message."""
+        if v is None:
+            return ""
+        type_name = type(v).__name__
+        if isinstance(v, str):
+            preview = v if len(v) <= 40 else v[:40] + "…"
+            return f'{type_name} ({preview!r})'
+        return type_name
+
+    def _did_you_mean(self, name: str) -> str:
+        """Suggest the closest valid arg name via shared-prefix matching.
+
+        Same approach as grep's path typo helper — cheap, no dependencies,
+        good enough for the common typo case ('paht' → 'path').
+        """
+        valid = [
+            p for p in inspect.signature(self._run).parameters
+            if p != "self"
+        ]
+        # 'shared prefix length' is the same primitive used in grep/__init__.py;
+        # not imported to avoid coupling tools/base.py to grep/.
+        def _shared_prefix(a: str, b: str) -> int:
+            n = min(len(a), len(b))
+            for i in range(n):
+                if a[i].lower() != b[i].lower():
+                    return i
+            return n
+
+        candidates = [
+            (cand, _shared_prefix(name, cand))
+            for cand in valid
+            if _shared_prefix(name, cand) >= max(2, len(name) // 2)
+        ]
+        if not candidates:
+            return ""
+        candidates.sort(key=lambda x: -x[1])
+        return f' (did you mean `{candidates[0][0]}`?)'
 
 
 # ---------------------------------------------------------------------------
