@@ -1,4 +1,5 @@
 import os, platform, shutil
+from pathlib import Path
 
 CWD = os.getcwd()
 PLATFORM = platform.system()        # "Windows" / "Linux" / "Darwin"
@@ -20,10 +21,15 @@ def _find_bash() -> str | None:
 
 BASH_PATH = _find_bash()
 
-# ripgrep gate for grep/glob tools. None means rg is not on PATH; the tools
-# are not registered in that case and the LLM must fall back to
-# execute_command("rg ..."). No env override (one-line detection by design).
-RG_PATH = shutil.which("rg")
+# Bundled ripgrep — placed by hatch_build.py at install time. RG_PATH=None
+# means the build hook didn't land a binary (network failure, unsupported
+# platform, or the package is being run from an unbuilt source tree); in that
+# case grep/glob don't register and the LLM is steered to reinstall.
+# No `shutil.which("rg")` system fallback: bundling is supposed to be the
+# always-present invariant, mixing in system rg would let version mismatches
+# leak in.
+_VENDOR_RG = Path(__file__).parent / "_vendor" / ("rg.exe" if PLATFORM == "Windows" else "rg")
+RG_PATH: str | None = str(_VENDOR_RG) if _VENDOR_RG.is_file() else None
 
 
 def safe_path(path: str) -> str:

@@ -31,19 +31,21 @@ def _priority_table(available_tools: set[str]) -> str:
 
 
 def _missing_rg_hint() -> str:
-    """Install hint shown when rg is absent — keeps the LLM from chasing a
+    """Hint shown when bundled rg is missing — keeps the LLM from chasing a
     grep/glob tool that isn't there.
+
+    With the bundling design, RG_PATH=None means the install-time download
+    failed (network issue, unsupported platform). The hint points the user
+    at reinstalling rather than running their own rg installer — the bundled
+    binary is the supported path.
     """
-    if config.PLATFORM == "Windows":
-        cmd = "winget install BurntSushi.ripgrep.MSVC"
-    elif config.PLATFORM == "Darwin":
-        cmd = "brew install ripgrep"
-    else:
-        cmd = "apt install ripgrep   # or your distro's equivalent"
     return (
-        "Note: ripgrep is not detected on this system. Install it "
-        f"(`{cmd}`) so that the dedicated `grep` and `glob` tools become "
-        "available. Until then, fall back to `execute_command(\"rg ...\")`.\n"
+        "Note: the bundled ripgrep binary is missing — the install-time "
+        "download likely failed. The dedicated `grep` and `glob` tools are "
+        "disabled. Reinstall mini-cc when network access is available "
+        "(`uv pip install -e .`) to restore them. Until then, content/file "
+        "search must go through `execute_command` with whatever tools the "
+        "shell exposes (e.g. `find`, `grep`).\n"
     )
 
 

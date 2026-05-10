@@ -23,8 +23,10 @@ def _build_prompt() -> str:
             "filename search via find/ls -R/git ls-files (use glob)",
         ]
     else:
-        # rg absent — execute_command is still the search fallback.
-        examples.append('execute_command("rg \'TODO\' src/")')
+        # Bundled rg missing → reinstall is the proper fix, but until then
+        # `find` / `grep` via the shell are the only search tools the LLM has.
+        examples.append('execute_command("grep -rn \'TODO\' src/")')
+        examples.append('execute_command("find src -type f -name \'*.py\'")')
 
     examples += [
         'execute_command("python script.py")',

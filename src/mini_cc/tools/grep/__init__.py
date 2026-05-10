@@ -88,11 +88,13 @@ class GrepTool(MiniTool):
         # `-e` guards against patterns starting with `-` being interpreted as flags
         rg_args += ["-e", pattern, p]
 
-        # 3. Spawn rg (bare 'rg' command name → OS PATH resolves; PATH-hijack
-        # mitigation pattern from CC utils/ripgrep.ts:40-42).
+        # 3. Spawn rg via the bundled binary (config.RG_PATH absolute path,
+        # placed by hatch_build.py at install time). No PATH lookup → PATH
+        # hijacking is irrelevant here; CC's bare-'rg' workaround does not
+        # apply because we never resolve via $PATH.
         try:
             proc = subprocess.run(
-                ["rg", *rg_args],
+                [config.RG_PATH, *rg_args],
                 capture_output=True,
                 text=True,
                 timeout=DEFAULT_TIMEOUT,

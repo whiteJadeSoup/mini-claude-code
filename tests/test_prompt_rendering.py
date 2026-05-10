@@ -10,8 +10,6 @@ Goal coverage (per grep-glob-tools.md plan §D7):
         — TP07 (execute_command prompt reverse-list when rg present)
         — TP08 (full system prompt diffs cleanly between rg-states)
 """
-import shutil
-
 import pytest
 
 from mini_cc import config
@@ -20,7 +18,8 @@ from mini_cc.tools import file_edit, file_read, file_write
 from mini_cc.tools.execute_command import prompt as exec_prompt_module
 
 
-HAS_RG = shutil.which("rg") is not None
+# Bundled rg is the source of truth (see test_grep_glob_tools.py for context).
+HAS_RG = config.RG_PATH is not None
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +51,7 @@ def test_TP02_no_rg_priority_table_omits_grep_glob():
     assert "→  grep" not in sp
     assert "→  glob" not in sp
     # Install hint must appear
-    assert "ripgrep is not detected" in sp
+    assert "bundled ripgrep binary is missing" in sp
 
 
 # ---------------------------------------------------------------------------
@@ -67,7 +66,7 @@ def test_TP03_with_grep_glob_priority_table_lists_them():
     assert "Tool selection priority:" in sp
     assert "→  grep" in sp
     assert "→  glob" in sp
-    assert "ripgrep is not detected" not in sp
+    assert "bundled ripgrep binary is missing" not in sp
 
 
 def test_TP04_no_grep_no_glob_omits_sections_and_adds_hint():
@@ -77,7 +76,7 @@ def test_TP04_no_grep_no_glob_omits_sections_and_adds_hint():
     assert "## grep" not in sp
     assert "## glob" not in sp
     # Install hint paragraph
-    assert "ripgrep is not detected" in sp
+    assert "bundled ripgrep binary is missing" in sp
 
 
 def test_TP04b_only_one_of_grep_glob_still_gates_each():
@@ -143,11 +142,12 @@ def test_TP07_execute_command_prompt_reflects_rg_state():
         assert "use grep" in p
         assert "use glob" in p
     else:
-        # rg absent — reverse list omits grep/glob (would point at non-existent
-        # tools), and the example list includes the rg fallback.
+        # Bundled rg missing — reverse list omits grep/glob (would point at
+        # non-existent tools), and example list shows shell-tool fallbacks
+        # (no rg, since users without bundled rg likely lack system rg too).
         assert "use grep" not in p
         assert "use glob" not in p
-        assert 'rg' in p   # example: execute_command("rg 'TODO' src/")
+        assert "find" in p or "grep -rn" in p   # shell-tool fallback example
 
 
 # ---------------------------------------------------------------------------

@@ -70,11 +70,11 @@ class GlobTool(MiniTool):
             rg_args += ["--glob", f"!{vcs}"]
         rg_args += ["--glob", pattern, search_dir]
 
-        # 3. Spawn rg
+        # 3. Spawn rg via bundled binary (see grep/__init__.py for rationale).
         start = time.monotonic()
         try:
             proc = subprocess.run(
-                ["rg", *rg_args],
+                [config.RG_PATH, *rg_args],
                 capture_output=True,
                 text=True,
                 timeout=DEFAULT_TIMEOUT,

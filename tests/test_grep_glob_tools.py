@@ -15,7 +15,6 @@ no-rg systems.
 """
 import asyncio
 import os
-import shutil
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,8 +33,12 @@ from mini_cc.tools.grep import (
 )
 
 
-HAS_RG = shutil.which("rg") is not None
-requires_rg = pytest.mark.skipif(not HAS_RG, reason="ripgrep not installed on PATH")
+# rg is now bundled by hatch_build.py at install time, so config.RG_PATH is
+# the source of truth (bundled binary path) — not shutil.which("rg") (system
+# PATH). Tests that need real rg are skipped only when the bundled binary
+# didn't land (broken install).
+HAS_RG = config.RG_PATH is not None
+requires_rg = pytest.mark.skipif(not HAS_RG, reason="bundled rg missing (build hook failed?)")
 
 
 # ---------------------------------------------------------------------------
