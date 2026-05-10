@@ -26,6 +26,7 @@ import re
 import sys
 import uuid
 from collections.abc import Callable
+from datetime import datetime, timezone
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -489,6 +490,16 @@ class QueryEngine:
             usage._tracker.reset()
 
             self.store.clear_layer_1()
+
+            # Compact erases the original file_read tool_results — neither
+            # full content nor any dedup stub reference survives in the new
+            # conversation prefix. The cached file_read_state must be reset
+            # to match: post-compact file_read should return fresh content
+            # (`unchanged=False`), not pretend the LLM still has access to
+            # something that has been replaced by the compact summary.
+            from mini_cc.state import file_read_state
+            file_read_state._state.clear()
+
             if system_msg is not None:
                 # Dispatch (not direct insert) so PersistenceConsumer writes
                 # the post-compact system prompt to JSONL. This means JSONL
@@ -606,38 +617,62 @@ class QueryEngine:
 
         return messages
 
+    # Time-based opportunistic clearing of old tool_result content.
+    # Modeled after CC's microCompact (services/compact/microCompact.ts +
+    # services/compact/timeBasedMCConfig.ts default `gapThresholdMinutes: 60`,
+    # `keepRecent: 5`).
+    #
+    # The original mini-cc design fired this hook on every prepare_messages
+    # call, keeping only the most recent tool batch. That made file_read
+    # dedup stubs reference deleted content (the stub said "refer to the
+    # earlier tool_result" but that result had already been wiped to
+    # "[Cleared]") — the LLM observed the broken contract and fell back to
+    # execute_command(cat). Verified via diagnostic logging on 2026-05-10:
+    # 129 file_read calls → 183 tool_results cleared by session end.
+    #
+    # Aligning with CC: clear only on idle gap, keep last N. Active sessions
+    # never trip this; budget overflow within an active session is handled
+    # by the existing auto-compact path (_should_auto_compact).
+    _TIME_BASED_CLEAR_GAP_SEC = 60 * 60   # 60 min idle, matches CC default
+    _TIME_BASED_CLEAR_KEEP = 5            # last 5 tool_results spared
+
     def _clear_old_tool_results(self, parent_id: str | None) -> None:
-        """Replace old ToolResultMessage content with '[Cleared]' in-place.
+        """Wipe old ToolResultMessage content to '[Cleared]' when idle.
 
-        Keeps the most recent tool-result group intact (the LLM needs
-        those to reason). Earlier tool outputs are large and no longer
-        useful; collapsing them reclaims context budget.
-
-        MUTATION CONTRACT: this method intentionally mutates ToolResultMessage
-        .content and .output on live store objects so that api_view() returns
-        "[Cleared]" for those slots. Consumers must NOT cache .content or
-        .output after dispatch — by the time this runs, dispatch has already
-        completed (TUI rendered the full result; JSONL captured the original
-        content as append-only). Future replay reads the JSONL originals, not
-        these mutated objects.
+        MUTATION CONTRACT: mutates ToolResultMessage .content/.output on
+        live store objects so api_view() returns "[Cleared]" for those
+        slots. Consumers must NOT cache .content/.output after dispatch —
+        TUI has already rendered, JSONL has already persisted the original.
+        Future replay reads JSONL, not mutated objects.
         """
         branch = [
-            m
-            for m in self.store._messages
+            m for m in self.store._messages
             if m.parent_id == parent_id
-            and isinstance(m, (AssistantMessage, ToolResultMessage))
         ]
-        last_tool_asst_idx = -1
-        for i, m in enumerate(branch):
-            if isinstance(m, AssistantMessage) and isinstance(m.content, ToolUseBlock):
-                last_tool_asst_idx = i
-        if last_tool_asst_idx <= 0:
+
+        # Idle-gap trigger: most-recent UserMessage (real or synthetic) on
+        # this branch vs now. Synthetic users (e.g. compact body, task_state)
+        # count — they reset the clock just like a real turn would, since
+        # they represent a fresh conversational anchor the LLM should not
+        # immediately discard.
+        last_user_at = None
+        for m in reversed(branch):
+            if isinstance(m, UserMessage):
+                last_user_at = m.created_at
+                break
+        if last_user_at is None:
             return
+        gap_sec = (datetime.now(timezone.utc) - last_user_at).total_seconds()
+        if gap_sec < self._TIME_BASED_CLEAR_GAP_SEC:
+            return
+
+        tool_results = [m for m in branch if isinstance(m, ToolResultMessage)]
+        if len(tool_results) <= self._TIME_BASED_CLEAR_KEEP:
+            return
+
         cleared_marker = "[Cleared]"
-        for m in branch[:last_tool_asst_idx]:
-            if isinstance(m, ToolResultMessage) and not m.content.startswith(
-                cleared_marker
-            ):
+        for m in tool_results[:-self._TIME_BASED_CLEAR_KEEP]:
+            if not m.content.startswith(cleared_marker):
                 m.content = cleared_marker
                 m.output = None
 

@@ -2,6 +2,7 @@ PROMPT = """\
 Create a new file or fully overwrite an existing one.
 
 Usage:
+- ALWAYS use file_write for create/overwrite. NEVER invoke `echo > file`, `cat <<EOF`, `tee`, or `Set-Content` via execute_command — file_write enforces the read-gate (preventing silent overwrite of unseen content) that those raw commands skip.
 - For NEW files: just provide path and content. Parent directories are created automatically.
 - For EXISTING files: you MUST call file_read first (the read-gate enforces this). Overwriting an unread file risks silently losing changes you can't see.
 - Don't use this for small targeted edits — use file_edit instead (cheaper, less risky).

@@ -25,6 +25,18 @@ mini-cc = "mini_cc.__main__:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mini_cc"]
+# Include vendored ripgrep binary fetched by hatch_build.py at install time.
+# Both `rg` (Unix) and `rg.exe` (Windows) listed; only one exists per platform.
+artifacts = [
+    "src/mini_cc/_vendor/rg",
+    "src/mini_cc/_vendor/rg.exe",
+    "src/mini_cc/_vendor/.rg_version",
+]
+
+[tool.hatch.build.hooks.custom]
+# Build hook downloads platform-specific rg release into _vendor/ before
+# the wheel is sealed. Mirrors CC's npm postinstall pattern.
+path = "hatch_build.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

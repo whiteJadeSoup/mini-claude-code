@@ -14,6 +14,7 @@ on:
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -647,7 +648,12 @@ class TestCompactBoundaryPersistence:
 
 
 class TestClearOldToolResults:
-    """_clear_old_tool_results replaces all but the last tool-result group."""
+    """_clear_old_tool_results: idle-gap-triggered keep-last-N (CC microCompact style).
+
+    Trigger condition: gap between latest UserMessage on this branch and now
+    must be ≥ _TIME_BASED_CLEAR_GAP_SEC. When trigger fires, the last
+    _TIME_BASED_CLEAR_KEEP tool_results are spared; older ones get '[Cleared]'.
+    """
 
     def _make_tool_round(self, call_id: str, result: str) -> tuple:
         """Return (AssistantMessage with ToolUseBlock, ToolResultMessage)."""
@@ -662,52 +668,90 @@ class TestClearOldToolResults:
         )
         return asst, result_msg
 
-    def test_three_rounds_only_last_preserved(self, isolated_home):
-        engine = _make_engine(_ProgrammableLLM([]))
+    def _stale_user(self) -> UserMessage:
+        """A UserMessage timestamped far enough in the past to trip the
+        idle-gap trigger regardless of clock skew."""
+        return UserMessage(
+            content="hi",
+            created_at=datetime.now(timezone.utc) - timedelta(hours=24),
+        )
 
-        for call_id, result in [("id1", "result one"), ("id2", "result two"), ("id3", "result three")]:
+    def test_active_session_does_not_clear(self, isolated_home):
+        """Recent UserMessage → gap < 60min → no clearing even with many results."""
+        engine = _make_engine(_ProgrammableLLM([]))
+        # A "now"-stamped user message — gap is essentially 0.
+        engine.store.append(UserMessage(content="user query"))
+        for call_id, result in [("id1", "r1"), ("id2", "r2"), ("id3", "r3"),
+                                 ("id4", "r4"), ("id5", "r5"), ("id6", "r6"),
+                                 ("id7", "r7")]:
             asst, res = self._make_tool_round(call_id, result)
             engine.store.append(asst)
             engine.store.append(res)
 
         engine._clear_old_tool_results(parent_id=None)
 
-        tool_results = [
-            m for m in engine.store._messages if isinstance(m, ToolResultMessage)
-        ]
-        assert len(tool_results) == 3
-        # First two rounds must be cleared.
-        assert tool_results[0].content == "[Cleared]"
-        assert tool_results[0].output is None
-        assert tool_results[1].content == "[Cleared]"
-        assert tool_results[1].output is None
-        # Last round must retain original content.
-        assert tool_results[2].content == "result three"
-        assert tool_results[2].output is not None or tool_results[2].output is None  # output wasn't set
+        # Active session: nothing cleared, even though 7 > KEEP=5.
+        for i, expected in enumerate(["r1", "r2", "r3", "r4", "r5", "r6", "r7"]):
+            tr = [m for m in engine.store._messages if isinstance(m, ToolResultMessage)][i]
+            assert tr.content == expected
 
-    def test_single_round_nothing_cleared(self, isolated_home):
+    def test_idle_gap_clears_all_but_last_5(self, isolated_home):
+        """Stale user + 7 tool_results → first 2 cleared, last 5 spared."""
         engine = _make_engine(_ProgrammableLLM([]))
-
-        asst, res = self._make_tool_round("id1", "only result")
-        engine.store.append(asst)
-        engine.store.append(res)
+        engine.store.append(self._stale_user())
+        for call_id, result in [("id1", "r1"), ("id2", "r2"), ("id3", "r3"),
+                                 ("id4", "r4"), ("id5", "r5"), ("id6", "r6"),
+                                 ("id7", "r7")]:
+            asst, res = self._make_tool_round(call_id, result)
+            engine.store.append(asst)
+            engine.store.append(res)
 
         engine._clear_old_tool_results(parent_id=None)
 
-        tool_results = [
-            m for m in engine.store._messages if isinstance(m, ToolResultMessage)
-        ]
-        assert tool_results[0].content == "only result"
+        tool_results = [m for m in engine.store._messages if isinstance(m, ToolResultMessage)]
+        assert len(tool_results) == 7
+        # First 2 cleared (older than the keep-window)
+        assert tool_results[0].content == "[Cleared]"
+        assert tool_results[1].content == "[Cleared]"
+        # Last 5 spared
+        for tr, expected in zip(tool_results[2:], ["r3", "r4", "r5", "r6", "r7"]):
+            assert tr.content == expected
+
+    def test_idle_gap_under_keep_threshold_is_noop(self, isolated_home):
+        """Stale user but only 3 tool_results (≤ KEEP=5) → nothing cleared."""
+        engine = _make_engine(_ProgrammableLLM([]))
+        engine.store.append(self._stale_user())
+        for call_id, result in [("id1", "r1"), ("id2", "r2"), ("id3", "r3")]:
+            asst, res = self._make_tool_round(call_id, result)
+            engine.store.append(asst)
+            engine.store.append(res)
+
+        engine._clear_old_tool_results(parent_id=None)
+
+        tool_results = [m for m in engine.store._messages if isinstance(m, ToolResultMessage)]
+        assert [tr.content for tr in tool_results] == ["r1", "r2", "r3"]
+
+    def test_no_user_message_is_noop(self, isolated_home):
+        """No UserMessage on branch → trigger inert."""
+        engine = _make_engine(_ProgrammableLLM([]))
+        for call_id, result in [("id1", "r1"), ("id2", "r2")]:
+            asst, res = self._make_tool_round(call_id, result)
+            engine.store.append(asst)
+            engine.store.append(res)
+
+        engine._clear_old_tool_results(parent_id=None)  # must not raise
+
+        tool_results = [m for m in engine.store._messages if isinstance(m, ToolResultMessage)]
+        assert [tr.content for tr in tool_results] == ["r1", "r2"]
 
     def test_no_tool_calls_is_noop(self, isolated_home):
         engine = _make_engine(_ProgrammableLLM([]))
+        engine.store.append(self._stale_user())
         engine.store.append(AssistantMessage(
             turn_id="t1", model="m", content=TextBlock(text="hello")
         ))
 
         engine._clear_old_tool_results(parent_id=None)  # must not raise
 
-        tool_results = [
-            m for m in engine.store._messages if isinstance(m, ToolResultMessage)
-        ]
+        tool_results = [m for m in engine.store._messages if isinstance(m, ToolResultMessage)]
         assert tool_results == []

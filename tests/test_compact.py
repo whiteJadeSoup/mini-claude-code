@@ -15,6 +15,7 @@ from mini_cc.engine.messages import (
     TextBlock,
     UserMessage,
 )
+from mini_cc.state import file_read_state
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +177,36 @@ class TestCompactPostState:
             m for m in engine.store.all() if isinstance(m, CompactBoundaryMessage)
         ]
         assert len(boundaries) == 2
+
+    @pytest.mark.asyncio
+    async def test_compact_clears_file_read_state(self, engine, monkeypatch):
+        """compact() must reset file_read_state.
+
+        After compact, the original file_read tool_results are gone (replaced
+        by the summary body). The cached file_read_state would otherwise stay
+        populated, and a post-compact file_read on the same path would dedup-
+        hit and return content the LLM "saw" only in the discarded original
+        tool_result. Forcing a fresh read keeps the cache aligned with what
+        the LLM can actually see.
+        """
+        # Seed the cache as if a prior file_read had populated it.
+        fresh_state = file_read_state.FileReadState()
+        fresh_state.record(
+            resolved_path="/test/cwd/foo.py",
+            content="cached content",
+            mtime_ms=1234,
+            offset=1,
+            limit=2000,
+        )
+        monkeypatch.setattr(file_read_state, "_state", fresh_state)
+        assert file_read_state._state.get("/test/cwd/foo.py") is not None
+
+        _populate(engine)
+        await engine.compact()
+
+        # After compact, the cache must be empty — any subsequent file_read
+        # on /test/cwd/foo.py will return fresh content with unchanged=False.
+        assert file_read_state._state.get("/test/cwd/foo.py") is None
 
 
 # ---------------------------------------------------------------------------

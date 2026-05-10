@@ -8,36 +8,164 @@ def _platform_line() -> str:
     return f"Platform: {config.PLATFORM} ({shell})"
 
 
-def build_system_prompt(skill_section: str = "") -> str:
-    """Build the main agent system prompt. Rebuilt each turn so newly discovered skills appear."""
+def _priority_table(available_tools: set[str]) -> str:
+    """Layer-1 tool selection table. Conditional on rg-gated tools.
+
+    Format keeps row labels at fixed indent so the model parses it as a table
+    rather than prose. Bottom row is the residual fallback.
+    """
+    rows: list[tuple[str, str]] = [
+        ("Read text",         "file_read"),
+        ("Create / overwrite","file_write"),
+        ("Edit",              "file_edit"),
+    ]
+    if "grep" in available_tools:
+        rows.append(("Content search", "grep"))
+    if "glob" in available_tools:
+        rows.append(("Filename search", "glob"))
+    rows.append(("Everything else", "execute_command"))
+
+    width = max(len(label) for label, _ in rows)
+    body = "\n".join(f"  {label:<{width}}  →  {tool}" for label, tool in rows)
+    return f"Tool selection priority:\n{body}\n"
+
+
+def _missing_rg_hint() -> str:
+    """Hint shown when bundled rg is missing — keeps the LLM from chasing a
+    grep/glob tool that isn't there.
+
+    With the bundling design, RG_PATH=None means the install-time download
+    failed (network issue, unsupported platform). The hint points the user
+    at reinstalling rather than running their own rg installer — the bundled
+    binary is the supported path.
+    """
     return (
-        f"You are a coding agent in: {config.CWD}\n"
-        f"{_platform_line()}\n"
-        f"Answer questions and chat normally without tools. Use tools only when the task actually requires running code, reading files, or taking action — not for simple questions or greetings.\n"
-        f"\n"
-        f"## execute_command\n"
-        f"Use execute_command for shell tasks. Examples (not exhaustive):\n"
-        f"- Search content: grep, rg, awk\n"
-        f"- Find files: find, ls, tree\n"
-        f"- Run scripts, installs, git, and any other commands\n"
-        f"- Binary files (images, PDFs): file, xxd, hexdump\n"
-        f"\n"
-        f"## file_read\n"
-        f"Use file_read to read text files with cat -n line numbers. Default reads up to 2000 lines from the start; use offset and limit for chunked continuation. Output line-number prefix is for navigation only — never include it in old_string for file_edit.\n"
-        f"\n"
-        f"## file_write\n"
-        f"Use file_write to create new files or fully overwrite existing files. For existing files, you MUST call file_read first — the read-gate will reject otherwise. Don't use it for small edits (use file_edit).\n"
-        f"\n"
-        f"## file_edit\n"
-        f"Use file_edit for targeted string replacements in existing files. You MUST call file_read first — the read-gate will reject otherwise. old_string must be unique in the file; if multiple matches exist, either add surrounding context to make it unique, or pass replace_all=true.\n"
-        f"\n"
-        f"## Workflow\n"
-        f"Simple checklists (no dependencies): plan_todos → update_todo(in_progress) → work → update_todo(done).\n"
-        f"Complex tasks with dependencies: plan_tasks (declare depends_on) → update_task(in_progress) → work → update_task(done).\n"
-        f"Independent subtasks: use the task tool.\n"
-        f"Domain knowledge: use run_skill to execute skills in isolated context."
-        + skill_section
+        "Note: the bundled ripgrep binary is missing — the install-time "
+        "download likely failed. The dedicated `grep` and `glob` tools are "
+        "disabled. Reinstall mini-cc when network access is available "
+        "(`uv pip install -e .`) to restore them. Until then, content/file "
+        "search must go through `execute_command` with whatever tools the "
+        "shell exposes (e.g. `find`, `grep`).\n"
     )
+
+
+def build_system_prompt(
+    skill_section: str = "",
+    available_tools: set[str] | None = None,
+) -> str:
+    """Build the main agent system prompt.
+
+    Rebuilt each turn so newly discovered skills appear.
+
+    `available_tools` controls Layer-1 priority table rendering and per-tool
+    section gating. Default reads from the live registry — pass an explicit
+    set in tests.
+    """
+    if available_tools is None:
+        from mini_cc.tools.base import _REGISTRY
+        available_tools = set(_REGISTRY.keys())
+
+    has_grep = "grep" in available_tools
+    has_glob = "glob" in available_tools
+
+    sections: list[str] = []
+    sections.append(f"You are a coding agent in: {config.CWD}")
+    sections.append(_platform_line())
+    sections.append(
+        "Answer questions and chat normally without tools. Use tools only when "
+        "the task actually requires running code, reading files, or taking action "
+        "— not for simple questions or greetings."
+    )
+    sections.append("")
+    sections.append(_priority_table(available_tools))
+
+    if has_grep and has_glob:
+        # Discovery-first workflow guard.
+        # Empirical: deepseek-v4-pro routinely guesses file names from training
+        # data ("there's probably a memory_tools.py"), gets back-to-back NOT
+        # FOUND, then panics into shell `ls -laR` / `grep -rn`. The
+        # ALWAYS/NEVER directives above don't fire because the model doesn't
+        # think it's "searching" — it thinks it's "recovering". This block
+        # gives the recovery path an explicit name.
+        sections.append(
+            "## Discovery-first workflow\n"
+            "Before reading or editing a file you have not yet seen, confirm "
+            "the path exists with glob — DO NOT guess names from project "
+            "conventions or your training data. If file_read returns "
+            "`File not found`, your next call MUST be glob (to enumerate "
+            "real paths) or grep (to locate by content). DO NOT fall back "
+            "to execute_command(`ls -R`, `find`, `grep -rn`) — those are "
+            "the same operations as glob/grep, just slower, noisier, and "
+            "without the head_limit budget. The dedicated tools are the "
+            "recovery path, not the last resort."
+        )
+
+    sections.append(
+        "## file_read\n"
+        "Use file_read to read text files with cat -n line numbers. Default "
+        "reads up to 2000 lines from the start; use offset and limit for "
+        "chunked continuation. Output line-number prefix is for navigation "
+        "only — never include it in old_string for file_edit. NEVER read text "
+        "files via execute_command(\"cat ...\") — file_read enforces the "
+        "read-gate that downstream file_edit/file_write rely on."
+    )
+    sections.append(
+        "## file_write\n"
+        "Use file_write to create new files or fully overwrite existing files. "
+        "For existing files, you MUST call file_read first — the read-gate "
+        "will reject otherwise. Don't use it for small edits (use file_edit). "
+        "NEVER overwrite via shell redirection (`echo > file`, `cat <<EOF`) — "
+        "those bypass the read-gate."
+    )
+    sections.append(
+        "## file_edit\n"
+        "Use file_edit for targeted string replacements in existing files. You "
+        "MUST call file_read first — the read-gate will reject otherwise. "
+        "old_string must be unique in the file; if multiple matches exist, "
+        "either add surrounding context to make it unique, or pass "
+        "replace_all=true. NEVER edit via `sed -i` or `awk -i inplace` — "
+        "those skip the uniqueness check and CRLF-aware staleness detection."
+    )
+
+    if has_grep:
+        sections.append(
+            "## grep\n"
+            "Use grep for content search (regex via ripgrep). Three output_modes: "
+            "files_with_matches (default, mtime-sorted paths), content "
+            "(matching lines with -n/context), count (per-file totals). Filter "
+            "by `type` (e.g. \"py\", \"js\") or `glob` (e.g. \"*.ts\"). "
+            "head_limit defaults to 100 — pass 0 only when you genuinely need "
+            "every match. NEVER invoke `grep` or `rg` via execute_command — "
+            "the dedicated tool gives VCS exclusion, head_limit, and "
+            "structured output that raw shell calls don't."
+        )
+    if has_glob:
+        sections.append(
+            "## glob\n"
+            "Use glob for filename search (shell glob via ripgrep). Pattern "
+            "uses `**`, `{a,b}` alternation, etc. Results are mtime-sorted "
+            "(recent first), capped at 100 with `truncated` flag. NEVER use "
+            "`find`, `ls -R`, or `git ls-files` via execute_command — glob "
+            "handles VCS exclusion and capping that raw commands lack."
+        )
+
+    sections.append(
+        "## execute_command\n"
+        "Use only for shell tasks NOT covered by the dedicated tools above: "
+        "scripts, installs, git, environment inspection, build commands."
+    )
+    if not (has_grep and has_glob):
+        sections.append(_missing_rg_hint())
+
+    sections.append(
+        "## Workflow\n"
+        "Simple checklists (no dependencies): plan_todos → update_todo(in_progress) → work → update_todo(done).\n"
+        "Complex tasks with dependencies: plan_tasks (declare depends_on) → update_task(in_progress) → work → update_task(done).\n"
+        "Independent subtasks: use the task tool.\n"
+        "Domain knowledge: use run_skill to execute skills in isolated context."
+    )
+
+    return "\n\n".join(s.rstrip() for s in sections if s) + skill_section
 
 
 SUB_SYSTEM_PROMPT = (

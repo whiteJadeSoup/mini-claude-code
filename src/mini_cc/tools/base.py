@@ -114,17 +114,83 @@ class FileReadOutput(ToolOutput):
         # Plain text only — no <system-reminder> tag (CC uses it because its
         # system prompt teaches the LLM how to read the tag; mini-cc's prompts.py
         # has no such convention, so wrapping in the tag would invent a protocol.)
-        if self.unchanged:
-            # Aligned with CC `FILE_UNCHANGED_STUB` (FileReadTool/prompt.ts:7-8)
-            return ("File unchanged since last read. The content from the earlier "
-                    "file_read tool_result in this conversation is still current — "
-                    "refer to that instead of re-reading.")
+        #
+        # The `unchanged` flag is now a UI-only annotation — the API path
+        # always returns content. CC's `FILE_UNCHANGED_STUB` ("refer to the
+        # earlier tool_result") relies on that earlier result still being
+        # in context, but mini-cc's engine clears old tool_results on every
+        # turn (see _clear_old_tool_results); the stub would point at
+        # `[Cleared]`. Re-emitting content keeps the dedup tool-IO-cheap
+        # (no disk re-read) without breaking the LLM's view.
         if self.total_lines == 0:
             return f"File is empty: {self.path}"
         if self.returned_lines == 0:
             return (f"File has {self.total_lines} lines; "
                     f"offset {self.start_line} is beyond the end.")
         return self.content
+
+
+class GrepOutput(ToolOutput):
+    type: Literal["grep"] = "grep"
+    mode: Literal["content", "files_with_matches", "count"]
+    num_files: int
+    filenames: list[str] = []                # Empty in content/count modes
+    content: str = ""                        # Set in content/count modes
+    num_matches: int = 0                     # Set in count mode (sum across files)
+    applied_limit: int | None = None         # Filled only when truncation kicked in
+    applied_offset: int = 0
+
+    def to_api_str(self) -> str:
+        # Aligned with CC GrepTool.ts:254-308 mapToolResultToToolResultBlockParam
+        if self.mode == "content":
+            body = self.content or "No matches found"
+            paging = self._paging_hint()
+            return f"{body}\n\n{paging}" if paging else body
+        if self.mode == "count":
+            paging = self._paging_hint()
+            files_word = "file" if self.num_files == 1 else "files"
+            occ_word = "occurrence" if self.num_matches == 1 else "occurrences"
+            summary = (
+                f"\n\nFound {self.num_matches} total {occ_word} "
+                f"across {self.num_files} {files_word}."
+            )
+            if paging:
+                summary += f" with pagination = {paging}"
+            return (self.content or "No matches found") + summary
+        # files_with_matches
+        if self.num_files == 0:
+            return "No files found"
+        paging = self._paging_hint()
+        files_word = "file" if self.num_files == 1 else "files"
+        header = f"Found {self.num_files} {files_word}"
+        if paging:
+            header += f" {paging}"
+        return f"{header}\n" + "\n".join(self.filenames)
+
+    def _paging_hint(self) -> str:
+        parts = []
+        if self.applied_limit is not None:
+            parts.append(f"limit: {self.applied_limit}")
+        if self.applied_offset:
+            parts.append(f"offset: {self.applied_offset}")
+        return ", ".join(parts)
+
+
+class GlobOutput(ToolOutput):
+    type: Literal["glob"] = "glob"
+    filenames: list[str] = []        # CWD-relative paths
+    num_files: int
+    truncated: bool = False          # True when matches > GLOB_CAP
+    duration_ms: int
+
+    def to_api_str(self) -> str:
+        # Aligned with CC GlobTool.ts:177-197
+        if not self.filenames:
+            return "No files found"
+        body = "\n".join(self.filenames)
+        if self.truncated:
+            body += "\n(Results are truncated. Consider using a more specific path or pattern.)"
+        return body
 
 
 class TodoPlanOutput(ToolOutput):

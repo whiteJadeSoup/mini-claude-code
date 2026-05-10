@@ -8,7 +8,7 @@ from typing import Any
 from langchain_core.language_models import LanguageModelInput
 from langchain_deepseek import ChatDeepSeek
 
-from mini_cc import prompts
+from mini_cc import config, prompts
 import mini_cc.tools  # noqa: F401 — side-effect: registers all MiniTools
 from mini_cc.tools.base import get_tool
 from mini_cc.skills import _skill_manager
@@ -70,8 +70,12 @@ _llm_base = _ChatDeepSeekRoundTrip(
     stream_usage=True,
 )
 
-SUB_TOOLS = [_lc(n) for n in (
+_sub_tool_names = [
     "plan_todos", "update_todo", "plan_tasks", "update_task",
     "execute_command", "file_read", "file_write", "file_edit",
-)]
+]
+if config.RG_PATH:
+    _sub_tool_names += ["grep", "glob"]
+
+SUB_TOOLS = [_lc(n) for n in _sub_tool_names]
 MAIN_TOOLS = [_lc("task"), _lc("run_skill")] + SUB_TOOLS

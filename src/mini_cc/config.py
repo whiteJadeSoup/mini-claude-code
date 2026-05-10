@@ -1,4 +1,5 @@
 import os, platform, shutil
+from pathlib import Path
 
 CWD = os.getcwd()
 PLATFORM = platform.system()        # "Windows" / "Linux" / "Darwin"
@@ -20,6 +21,16 @@ def _find_bash() -> str | None:
 
 BASH_PATH = _find_bash()
 
+# Bundled ripgrep — placed by hatch_build.py at install time. RG_PATH=None
+# means the build hook didn't land a binary (network failure, unsupported
+# platform, or the package is being run from an unbuilt source tree); in that
+# case grep/glob don't register and the LLM is steered to reinstall.
+# No `shutil.which("rg")` system fallback: bundling is supposed to be the
+# always-present invariant, mixing in system rg would let version mismatches
+# leak in.
+_VENDOR_RG = Path(__file__).parent / "_vendor" / ("rg.exe" if PLATFORM == "Windows" else "rg")
+RG_PATH: str | None = str(_VENDOR_RG) if _VENDOR_RG.is_file() else None
+
 
 def safe_path(path: str) -> str:
     """Resolve path relative to CWD and reject escapes.
@@ -34,3 +45,18 @@ def safe_path(path: str) -> str:
     if not resolved_norm.startswith(cwd_norm + os.sep) and resolved_norm != cwd_norm:
         raise ValueError(f"Path {path} is outside working directory")
     return resolved
+
+
+def relativize(path: str) -> str:
+    """Turn an absolute path into a CWD-relative form for output.
+
+    grep/glob emit paths to the LLM; relative paths cost fewer tokens and
+    match how the user thinks about the project. Falls back to the input
+    unchanged for paths outside CWD (e.g. symlinks resolved elsewhere).
+    """
+    try:
+        rel = os.path.relpath(path, CWD)
+    except ValueError:
+        # Different drives on Windows — relpath raises; return path as-is.
+        return path
+    return rel if not rel.startswith("..") else path

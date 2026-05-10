@@ -2,6 +2,7 @@ PROMPT = """\
 Make a targeted string replacement in an existing file.
 
 Usage:
+- ALWAYS use file_edit for string replacements. NEVER invoke `sed -i`, `awk -i inplace`, or shell-redirected rewrites via execute_command — file_edit enforces the read-gate, uniqueness check, and CRLF-aware staleness detection that those raw commands lack.
 - You MUST call file_read on this file before file_edit (the read-gate enforces this). file_edit will reject if there's no read evidence or the file changed since your last read.
 - old_string must match the bytes on disk exactly, including whitespace/indentation. NEVER include the line-number prefix (`<num><tab>`) from file_read output in old_string — that prefix is rendering only, not part of the file.
 - old_string must occur exactly once in the file (uniqueness gate). If multiple matches exist, either (1) extend old_string with surrounding context to make it unique, or (2) set replace_all=true to replace all occurrences.

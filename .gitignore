@@ -25,3 +25,9 @@ skills/
 # Local scratch files (notes, ad-hoc test outputs)
 cc-memory-course.md
 test_output.txt
+
+# Vendored binaries — fetched per-platform by hatch_build.py at install time;
+# never committed (would bloat the repo and tie it to one platform's rg).
+# Ignore the whole directory: __init__.py, rg(.exe), and .rg_version are all
+# runtime artifacts created by the build hook.
+src/mini_cc/_vendor/
