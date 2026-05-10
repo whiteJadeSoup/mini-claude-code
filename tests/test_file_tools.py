@@ -434,3 +434,187 @@ def test_T28b_write_preserves_rich_data(workdir, fr, fw):
     assert out.content == "second version"
     api = out.to_api_str()
     assert "version" not in api  # rich content not exposed
+
+
+# ---------------------------------------------------------------------------
+# B3: file_write coverage (T29-T32)
+# ---------------------------------------------------------------------------
+
+def test_T29_write_creates_new_file(workdir, fw):
+    """Create path: no read-gate, operation='create', original_content is None."""
+    out = _arun(fw.execute(path="new.py", content="print('hi')"))
+    assert isinstance(out, FileWriteOutput)
+    assert out.operation == "create"
+    assert out.original_content is None
+    assert out.bytes_written == len("print('hi')".encode("utf-8"))
+    assert (workdir / "new.py").read_text(encoding="utf-8") == "print('hi')"
+
+
+def test_T30_write_unread_existing_rejected(workdir, fw):
+    """Existing file without prior file_read → read-gate rejects, disk untouched."""
+    (workdir / "x.py").write_text("v1", encoding="utf-8")
+    out = _arun(fw.execute(path="x.py", content="v2"))
+    assert isinstance(out, ToolErrorOutput)
+    assert "has not been read yet" in out.message
+    assert "file_read('x.py')" in out.message  # actionable next-step
+    assert (workdir / "x.py").read_text(encoding="utf-8") == "v1"  # untouched
+
+
+def test_T31_write_external_change_rejects(workdir, fr, fw):
+    """Read → external mtime+content change → write rejects with stale error."""
+    p = workdir / "shared.py"
+    p.write_text("v1", encoding="utf-8")
+    _arun(fr.execute(path="shared.py"))
+
+    import time
+    time.sleep(0.05)
+    p.write_text("externally edited", encoding="utf-8")
+
+    out = _arun(fw.execute(path="shared.py", content="v3"))
+    assert isinstance(out, ToolErrorOutput)
+    assert "modified since you last read" in out.message
+    assert p.read_text(encoding="utf-8") == "externally edited"  # not overwritten
+
+
+def test_T32_write_creates_parent_dirs(workdir, fw):
+    """OQ3: file_write auto-mkdirs parent directories when creating new file."""
+    out = _arun(fw.execute(path="a/b/c/x.py", content="ok"))
+    assert isinstance(out, FileWriteOutput)
+    assert out.operation == "create"
+    assert (workdir / "a" / "b" / "c" / "x.py").read_text(encoding="utf-8") == "ok"
+
+
+# ---------------------------------------------------------------------------
+# S1: FileReadState LRU eviction (T33)
+# ---------------------------------------------------------------------------
+
+def test_T33_file_read_state_lru_eviction():
+    """LRU cap evicts the least-recently-used entry on overflow; get() refreshes recency."""
+    from mini_cc.state.file_read_state import FileReadState
+
+    s = FileReadState(max_entries=3)
+    s.record("/a", "A", 1, 1, 100)
+    s.record("/b", "B", 1, 1, 100)
+    s.record("/c", "C", 1, 1, 100)
+    assert len(s._entries) == 3
+
+    # Adding 4th evicts oldest (a)
+    s.record("/d", "D", 1, 1, 100)
+    assert s.get("/a") is None
+    assert s.get("/b") is not None
+    assert s.get("/c") is not None
+    assert s.get("/d") is not None
+
+    # Promote /b via get(), then add /e — should evict /c (now oldest), keep /b
+    s.get("/b")
+    s.record("/e", "E", 1, 1, 100)
+    assert s.get("/c") is None  # evicted
+    assert s.get("/b") is not None  # promoted, retained
+    assert s.get("/e") is not None
+    assert s.get("/d") is not None
+
+
+# ---------------------------------------------------------------------------
+# B1: empty old_string rejected (T34)
+# ---------------------------------------------------------------------------
+
+def test_T34_edit_empty_old_string_rejected(workdir, fr, fe):
+    """Empty old_string is statically rejected — must not corrupt files via str.replace('', X)."""
+    p = workdir / "a.py"
+    p.write_text("hello", encoding="utf-8")
+    _arun(fr.execute(path="a.py"))
+
+    # replace_all=False
+    out1 = _arun(fe.execute(path="a.py", old_string="", new_string="X"))
+    assert isinstance(out1, ToolErrorOutput)
+    assert "cannot be empty" in out1.message
+    assert p.read_text(encoding="utf-8") == "hello"  # untouched
+
+    # replace_all=True (the dangerous corruption path)
+    out2 = _arun(fe.execute(path="a.py", old_string="", new_string="X", replace_all=True))
+    assert isinstance(out2, ToolErrorOutput)
+    assert "cannot be empty" in out2.message
+    # If the static reject hadn't fired, this would have become 'XhXeXlXlXoX'.
+    assert p.read_text(encoding="utf-8") == "hello"
+
+
+# ---------------------------------------------------------------------------
+# S2: empty file read (T35)
+# ---------------------------------------------------------------------------
+
+def test_T35_read_empty_file(workdir, fr):
+    """Reading a 0-byte file: total_lines=0 and api_str picks the 'File is empty' branch."""
+    (workdir / "empty.txt").write_text("", encoding="utf-8")
+    out = _arun(fr.execute(path="empty.txt"))
+    assert isinstance(out, FileReadOutput)
+    assert out.total_lines == 0
+    assert out.returned_lines == 0
+    api = out.to_api_str()
+    assert "File is empty" in api
+    assert "empty.txt" in api
+
+
+# ---------------------------------------------------------------------------
+# S3: UI render contracts (TR01-TR12)
+# ---------------------------------------------------------------------------
+
+def test_TR01_render_received_file_read_default(fr):
+    assert fr.render_received({"path": "foo.py"}) == "foo.py"
+
+
+def test_TR02_render_received_file_read_with_offset(fr):
+    assert fr.render_received({"path": "big.log", "offset": 2001}) == "big.log @2001"
+
+
+def test_TR03_render_received_file_read_with_limit(fr):
+    assert fr.render_received({"path": "big.log", "limit": 500}) == "big.log (limit=500)"
+
+
+def test_TR04_render_complete_file_read_unchanged(fr):
+    out = FileReadOutput(path="foo.py", unchanged=True)
+    assert fr.render_complete({"path": "foo.py"}, out) == "foo.py · unchanged"
+
+
+def test_TR05_render_complete_file_read_normal(fr):
+    out = FileReadOutput(
+        path="foo.py", content="...", total_lines=50, start_line=1, returned_lines=50,
+    )
+    assert fr.render_complete({"path": "foo.py"}, out) == "foo.py · 50 lines"
+
+
+def test_TR06_render_complete_file_read_truncated(fr):
+    out = FileReadOutput(
+        path="big.log", content="...", total_lines=5000, start_line=1,
+        returned_lines=2000, truncated_by_limit=True,
+    )
+    assert fr.render_complete({"path": "big.log"}, out) == "big.log · 1-2000 of 5000"
+
+
+def test_TR07_render_complete_file_read_empty(fr):
+    out = FileReadOutput(path="x.txt", total_lines=0)
+    assert fr.render_complete({"path": "x.txt"}, out) == "x.txt · empty"
+
+
+def test_TR08_render_complete_file_read_offset_beyond(fr):
+    out = FileReadOutput(path="x.txt", total_lines=10, start_line=999, returned_lines=0)
+    assert fr.render_complete({"path": "x.txt"}, out) == "x.txt · offset beyond end"
+
+
+def test_TR09_render_complete_file_write_create(fw):
+    out = FileWriteOutput(path="new.py", operation="create", bytes_written=100)
+    assert fw.render_complete({"path": "new.py"}, out) == "new.py · created (100 B)"
+
+
+def test_TR10_render_complete_file_write_update_kb(fw):
+    out = FileWriteOutput(path="x.py", operation="update", bytes_written=2048)
+    assert fw.render_complete({"path": "x.py"}, out) == "x.py · updated (2.0 KB)"
+
+
+def test_TR11_render_complete_file_edit_single(fe):
+    out = FileEditOutput(path="a.py", replaced=True, replace_count=1)
+    assert fe.render_complete({"path": "a.py"}, out) == "a.py · edited"
+
+
+def test_TR12_render_complete_file_edit_replace_all(fe):
+    out = FileEditOutput(path="a.py", replaced=True, replace_count=5)
+    assert fe.render_complete({"path": "a.py"}, out) == "a.py · edited (5)"

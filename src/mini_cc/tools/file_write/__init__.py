@@ -35,7 +35,9 @@ class FileWriteTool(MiniTool):
         except ValueError:
             return ToolErrorOutput(message=(
                 f"Path '{path}' is outside the working directory ({config.CWD}). "
-                f"file_write can only create or overwrite files inside this project."
+                f"file_write can only create or overwrite files inside this project — "
+                f"writing outside would break sandbox isolation. To create a file "
+                f"elsewhere on the system, use execute_command instead."
             ))
 
         file_exists = os.path.exists(p)

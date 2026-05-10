@@ -40,15 +40,16 @@ class _ChatDeepSeekRoundTrip(ChatDeepSeek):
         **kwargs: Any,
     ) -> dict:
         payload = super()._get_request_payload(input_, stop=stop, **kwargs)
-        if isinstance(input_, list):
-            for src, dst in zip(input_, payload.get("messages", [])):
-                if not (isinstance(dst, dict) and dst.get("role") == "assistant"):
-                    continue
-                rc = ""
-                ak = getattr(src, "additional_kwargs", None)
-                if ak:
-                    rc = ak.get("reasoning_content") or ""
-                dst["reasoning_content"] = rc
+        # Single-pass over outbound messages — no zip with input_, so this
+        # works regardless of input shape (list[BaseMessage], PromptValue,
+        # str, dict-form messages, etc.) and survives any future langchain
+        # change that filters or coalesces messages between input and payload.
+        # `setdefault` preserves any reasoning_content already present (e.g.
+        # if a future engine change starts threading it through), otherwise
+        # falls back to "" — DeepSeek validates field presence, not content.
+        for dst in payload.get("messages", []):
+            if isinstance(dst, dict) and dst.get("role") == "assistant":
+                dst.setdefault("reasoning_content", "")
         return payload
 
 

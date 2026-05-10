@@ -10,9 +10,18 @@ for sub-agent isolation.
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 from typing import Optional
 
 from pydantic import BaseModel
+
+
+# LRU cap on stored entries. Aligned with CC's READ_FILE_STATE_CACHE_SIZE
+# (`utils/fileStateCache.ts:18`). Bounds memory at roughly
+# MAX_ENTRIES × MAX_FILE_CHARS = 100 × 100k = ~10 MB worst case.
+# Evicted entries simply make the next file_edit on that path hit the read-gate
+# ("must be read first"), recoverable with one extra file_read call.
+DEFAULT_MAX_ENTRIES = 100
 
 
 class Entry(BaseModel):
@@ -38,13 +47,24 @@ class Entry(BaseModel):
 
 
 class FileReadState:
-    """Per-agent file read evidence store. In-memory only, not persisted."""
+    """Per-agent file read evidence store. In-memory only, not persisted.
 
-    def __init__(self) -> None:
-        self._entries: dict[str, Entry] = {}
+    Backed by an OrderedDict acting as an LRU: get() refreshes recency,
+    record() inserts/updates and evicts the oldest entry once capacity is
+    exceeded. The cap protects long sessions (many distinct files touched
+    by a long-running task or sub-agent chain) from unbounded growth.
+    """
+
+    def __init__(self, max_entries: int = DEFAULT_MAX_ENTRIES) -> None:
+        self._entries: OrderedDict[str, Entry] = OrderedDict()
+        self._max_entries = max_entries
 
     def get(self, resolved_path: str) -> Entry | None:
-        return self._entries.get(resolved_path)
+        entry = self._entries.get(resolved_path)
+        if entry is not None:
+            # Refresh LRU recency on read
+            self._entries.move_to_end(resolved_path)
+        return entry
 
     def record(
         self,
@@ -57,6 +77,9 @@ class FileReadState:
         self._entries[resolved_path] = Entry(
             content=content, mtime_ms=mtime_ms, offset=offset, limit=limit,
         )
+        self._entries.move_to_end(resolved_path)
+        while len(self._entries) > self._max_entries:
+            self._entries.popitem(last=False)   # evict oldest
 
     def clear(self) -> None:
         self._entries.clear()

@@ -44,7 +44,8 @@ class FileReadTool(MiniTool):
         except ValueError:
             return ToolErrorOutput(message=(
                 f"Path '{path}' is outside the working directory ({config.CWD}). "
-                f"file_read can only access files inside this project. "
+                f"file_read can only access files inside this project — reading "
+                f"outside would let tool calls reach files unrelated to your task. "
                 f"To read system files, use execute_command "
                 f"(e.g., execute_command('cat {path}')) instead."
             ))
@@ -54,7 +55,7 @@ class FileReadTool(MiniTool):
             st = os.stat(p)
         except FileNotFoundError:
             return ToolErrorOutput(message=(
-                f"File not found at '{path}'. "
+                f"File not found at '{path}'. There is nothing to read. "
                 f"Verify the path is correct relative to the working directory ({config.CWD}). "
                 f"Use execute_command('ls <dir>') to list available files in the directory."
             ))
@@ -88,6 +89,7 @@ class FileReadTool(MiniTool):
         except UnicodeDecodeError:
             return ToolErrorOutput(message=(
                 f"File at '{path}' is not UTF-8 text and cannot be read by file_read. "
+                f"Binary content has no meaningful textual representation here. "
                 f"For binary files, use execute_command — "
                 f"e.g., execute_command('file {path}') to identify the type, "
                 f"or execute_command('xxd {path} | head') to view bytes."

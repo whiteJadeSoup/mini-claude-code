@@ -59,7 +59,10 @@ class CommandOutput(ToolOutput):
 class FileWriteOutput(ToolOutput):
     type: Literal["file_write"] = "file_write"
     path: str
-    operation: Literal["create", "update"]
+    # Default keeps older JSONL records (pre-PR shape: {type, path, bytes_written})
+    # deserializable after this change — same idiom as CompactBoundaryMessage's
+    # audit fields in engine/messages.py:101-107. New code always sets it explicitly.
+    operation: Literal["create", "update"] = "update"
     bytes_written: int
     # Rich data for UI v2+ — NOT exposed via to_api_str
     content: str = ""
@@ -249,10 +252,13 @@ def truncate_tool_content(content: str, tool_call_id: str) -> str:
         )
 
     preview = _sanitize_preview(content[:TOOL_CONTENT_PREVIEW_CHARS])
+    # Spill path lives under ~/.minicc/projects/, OUTSIDE the project sandbox.
+    # file_read would reject it via safe_path() — direct LLM at execute_command
+    # which has no sandbox restriction.
     return (
         f"[Tool result too large ({len(content):,} chars) — truncated. "
         f"Full content saved to {path}. "
-        f"Use the Read tool on this path if you need more than the preview below.]\n\n"
+        f"Run execute_command('cat \"{path}\"') if you need more than the preview below.]\n\n"
         f"--- First {TOOL_CONTENT_PREVIEW_CHARS:,} chars ---\n"
         f"{preview}"
     )

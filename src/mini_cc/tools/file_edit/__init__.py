@@ -55,12 +55,24 @@ class FileEditTool(MiniTool):
         new_string: str,
         replace_all: bool = False,
     ) -> ToolOutput:
-        # 1. Static reject (no IO)
+        # 1. Static rejects (no IO)
         if old_string == new_string:
             return ToolErrorOutput(message=(
                 "old_string and new_string are identical, so no edit would be applied. "
                 "If you intended to change something, double-check both strings — "
                 "likely the new_string is missing the change you wanted to make."
+            ))
+        # Empty old_string is dangerous: str.replace("", X) inserts X between
+        # every character. Catch here before any IO so a buggy/confused caller
+        # can't corrupt the file via the replace_all=True path.
+        if not old_string:
+            return ToolErrorOutput(message=(
+                "old_string cannot be empty. file_edit needs a non-empty anchor "
+                "string to locate where in the file the change should apply — "
+                "an empty anchor would either insert content between every "
+                "character or fail with no useful match. To insert content, "
+                "pass a unique anchor + your insertion in new_string. To create "
+                "a new file or fully overwrite content, use file_write."
             ))
 
         try:
@@ -68,7 +80,8 @@ class FileEditTool(MiniTool):
         except ValueError:
             return ToolErrorOutput(message=(
                 f"Path '{path}' is outside the working directory ({config.CWD}). "
-                f"file_edit can only modify files inside this project."
+                f"file_edit can only modify files inside this project — editing "
+                f"outside would break sandbox isolation."
             ))
 
         # 2. Read-gate first stage: must have an entry from a prior file_read
@@ -89,8 +102,9 @@ class FileEditTool(MiniTool):
         except FileNotFoundError:
             return ToolErrorOutput(message=(
                 f"File not found at '{path}'. The file may have been deleted "
-                f"after your last read. Call file_read('{path}') again to confirm — "
-                f"if it's truly gone, use file_write to create it instead of file_edit."
+                f"after your last read; there is nothing to edit. Call "
+                f"file_read('{path}') again to confirm — if it's truly gone, "
+                f"use file_write to create it instead of file_edit."
             ))
 
         # 4. Read disk content (CRLF-normalize for consistent comparison)
@@ -100,6 +114,7 @@ class FileEditTool(MiniTool):
         except UnicodeDecodeError:
             return ToolErrorOutput(message=(
                 f"File at '{path}' is not UTF-8 text and cannot be edited by file_edit. "
+                f"Binary content has no meaningful textual representation here. "
                 f"For binary files, use execute_command instead."
             ))
 
@@ -121,7 +136,8 @@ class FileEditTool(MiniTool):
         n = disk_content.count(old_string)
         if n == 0:
             return ToolErrorOutput(message=(
-                f"old_string was not found anywhere in '{path}'. Likely causes: "
+                f"old_string was not found anywhere in '{path}'. Your edit "
+                f"will not be applied. Likely causes: "
                 f"(1) the string differs in whitespace or indentation; "
                 f"(2) the file was edited since your last file_read. "
                 f"Call file_read('{path}') again to verify the exact bytes, "
