@@ -59,16 +59,31 @@ class CommandOutput(ToolOutput):
 class FileWriteOutput(ToolOutput):
     type: Literal["file_write"] = "file_write"
     path: str
+    # Default keeps older JSONL records (pre-PR shape: {type, path, bytes_written})
+    # deserializable after this change — same idiom as CompactBoundaryMessage's
+    # audit fields in engine/messages.py:101-107. New code always sets it explicitly.
+    operation: Literal["create", "update"] = "update"
     bytes_written: int
+    # Rich data for UI v2+ — NOT exposed via to_api_str
+    content: str = ""
+    original_content: str | None = None       # None for create
 
     def to_api_str(self) -> str:
-        return f"Written {self.bytes_written} bytes to {self.path}"
+        # Aligned with CC FileWriteTool.ts:418-432
+        if self.operation == "create":
+            return f"File created successfully at: {self.path}"
+        return f"The file {self.path} has been updated successfully."
 
 
 class FileEditOutput(ToolOutput):
     type: Literal["file_edit"] = "file_edit"
     path: str
     replaced: bool
+    replace_count: int = 0
+    # Rich data for UI v2+ — NOT exposed via to_api_str
+    old_string: str = ""
+    new_string: str = ""
+    original_content: str = ""
 
     @model_validator(mode="after")
     def _derive_is_error(self) -> "FileEditOutput":
@@ -76,9 +91,40 @@ class FileEditOutput(ToolOutput):
         return self
 
     def to_api_str(self) -> str:
-        if self.replaced:
-            return f"Edited {self.path}"
-        return f"Error: old_string not found in {self.path}"
+        # Aligned with CC FileEditTool.ts:581-593
+        if not self.replaced:
+            return f"Error: edit not applied to {self.path}"
+        if self.replace_count > 1:
+            return (f"The file {self.path} has been updated. "
+                    f"All occurrences were successfully replaced.")
+        return f"The file {self.path} has been updated successfully."
+
+
+class FileReadOutput(ToolOutput):
+    type: Literal["file_read"] = "file_read"
+    path: str
+    content: str = ""                # cat -n line-numbered text; empty when unchanged=True
+    total_lines: int = 0
+    start_line: int = 1              # 1-based starting line of this slice
+    returned_lines: int = 0
+    truncated_by_limit: bool = False
+    unchanged: bool = False          # G6 dedup hit (path/offset/limit/mtime all unchanged)
+
+    def to_api_str(self) -> str:
+        # Plain text only — no <system-reminder> tag (CC uses it because its
+        # system prompt teaches the LLM how to read the tag; mini-cc's prompts.py
+        # has no such convention, so wrapping in the tag would invent a protocol.)
+        if self.unchanged:
+            # Aligned with CC `FILE_UNCHANGED_STUB` (FileReadTool/prompt.ts:7-8)
+            return ("File unchanged since last read. The content from the earlier "
+                    "file_read tool_result in this conversation is still current — "
+                    "refer to that instead of re-reading.")
+        if self.total_lines == 0:
+            return f"File is empty: {self.path}"
+        if self.returned_lines == 0:
+            return (f"File has {self.total_lines} lines; "
+                    f"offset {self.start_line} is beyond the end.")
+        return self.content
 
 
 class TodoPlanOutput(ToolOutput):
@@ -169,6 +215,17 @@ TOOL_CONTENT_MAX_CHARS: int = 30_000     # trigger threshold (~15k tokens)
 TOOL_CONTENT_PREVIEW_CHARS: int = 1_024  # kept in the API-facing content
 
 
+def _sanitize_preview(text: str) -> str:
+    """Strip control characters that can cause API 400 errors.
+
+    Keeps printable ASCII/Unicode plus whitespace (tab, newline, carriage
+    return). Replaces other C0/C1 control chars with the replacement char.
+    These can appear in raw command output (ANSI escapes, terminal codes).
+    """
+    import re
+    return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "\ufffd", text)
+
+
 def truncate_tool_content(content: str, tool_call_id: str) -> str:
     """Offload oversized tool output; return API-safe preview."""
     if len(content) <= TOOL_CONTENT_MAX_CHARS:
@@ -187,18 +244,21 @@ def truncate_tool_content(content: str, tool_call_id: str) -> str:
         # If the disk write fails we'd rather return the first preview of
         # the original than hand the API a broken path. Caller sees a
         # preview with an explanatory note.
-        preview = content[:TOOL_CONTENT_PREVIEW_CHARS]
+        preview = _sanitize_preview(content[:TOOL_CONTENT_PREVIEW_CHARS])
         return (
             f"[Tool result was {len(content):,} chars — failed to spill to "
             f"disk ({type(e).__name__}: {e}). Showing first "
             f"{TOOL_CONTENT_PREVIEW_CHARS:,} chars only.]\n\n{preview}"
         )
 
-    preview = content[:TOOL_CONTENT_PREVIEW_CHARS]
+    preview = _sanitize_preview(content[:TOOL_CONTENT_PREVIEW_CHARS])
+    # Spill path lives under ~/.minicc/projects/, OUTSIDE the project sandbox.
+    # file_read would reject it via safe_path() — direct LLM at execute_command
+    # which has no sandbox restriction.
     return (
         f"[Tool result too large ({len(content):,} chars) — truncated. "
         f"Full content saved to {path}. "
-        f"Use the Read tool on this path if you need more than the preview below.]\n\n"
+        f"Run execute_command('cat \"{path}\"') if you need more than the preview below.]\n\n"
         f"--- First {TOOL_CONTENT_PREVIEW_CHARS:,} chars ---\n"
         f"{preview}"
     )

@@ -125,11 +125,13 @@ class AgentLoop:
                     None,
                 )
                 if tool_fn is None:
-                    content = (
-                        f"Error: unknown tool '{name}'. "
-                        f"Available: {', '.join(self._tools)}"
+                    output = ToolErrorOutput(
+                        message=(
+                            f"Error: unknown tool '{name}'. "
+                            f"Available: {', '.join(self._tools)}"
+                        )
                     )
-                    output = None
+                    content = output.to_api_str()
                 else:
                     token = _triggering_asst_id.set(
                         trigger.id if trigger else None
@@ -137,6 +139,9 @@ class AgentLoop:
                     try:
                         # MiniTools: execute() never throws; validation errors
                         # return a str via handle_validation_error callback.
+                        # NOTE: tools must not read _triggering_asst_id via
+                        # asyncio.create_task — the ContextVar is reset in the
+                        # finally block below, before any detached task runs.
                         raw = await tool_fn.ainvoke(tc["args"])
                     finally:
                         _triggering_asst_id.reset(token)

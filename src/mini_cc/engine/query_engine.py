@@ -256,9 +256,7 @@ class QueryEngine:
                             await self.compact(auto=True, trigger="query_retry")
                             # Re-add the user's original message so the model
                             # still knows what was asked after compact clears it.
-                            self.store._messages.append(
-                                UserMessage(content=user_text, source="user")
-                            )
+                            await self._dispatch(UserMessage(content=user_text, source="user"))
                         except Exception as ce:
                             print(f"[auto-compact failed: {ce}]",
                                   file=sys.stderr, flush=True)
@@ -285,7 +283,7 @@ class QueryEngine:
         """
         # Lazy import: tools.py imports this module (via get_engine),
         # and we need _sub_agent_scope from tools without a cycle at load.
-        from mini_cc.tools.builtins import _sub_agent_scope
+        from mini_cc.tools._utils import _sub_agent_scope
 
         last_text: str | None = None
         with _sub_agent_scope(label):
@@ -344,7 +342,7 @@ class QueryEngine:
         _prepare_messages, "query_retry" from the query()-level retry,
         "manual" from the /compact slash command.
         """
-        from mini_cc.tools.builtins import _sub_agent_scope
+        from mini_cc.tools._utils import _sub_agent_scope
         from mini_cc.consumers import persistence
         from mini_cc.engine._diagnostics import log_event, tracker_snapshot
 
@@ -473,7 +471,14 @@ class QueryEngine:
                         diag_attempts.append(attempt_record)
                         extra_chars += next_extra
 
-            summary = _extract_summary(response.content)
+            raw_content = response.content
+            if isinstance(raw_content, list):
+                # Some models return a list of content blocks (e.g. [{type: text, text: ...}])
+                # instead of a plain string. Concatenate all text blocks.
+                raw_content = "".join(
+                    b.get("text", "") for b in raw_content if isinstance(b, dict)
+                )
+            summary = _extract_summary(raw_content)
             body = _build_compact_body(summary, auto=auto)
             if task_state := tasks._tasks.state_summary():
                 body += f"\n\n---\n\nActive tasks at time of compaction:\n{task_state}"
@@ -485,12 +490,15 @@ class QueryEngine:
 
             self.store.clear_layer_1()
             if system_msg is not None:
-                # Direct insert: consumers already saw this message at boot.
-                # Re-dispatching would duplicate JSONL + re-render in UI.
-                # Tracker doesn't need a separate notify — context_tokens_used
-                # reads the store on demand and will pick up the re-inserted
-                # SystemPromptMessage next time it's called.
-                self.store._messages.insert(0, system_msg)
+                # Dispatch (not direct insert) so PersistenceConsumer writes
+                # the post-compact system prompt to JSONL. This means JSONL
+                # has: [...pre-compact..., system_msg, compact_boundary, body].
+                # Replay from the boundary then has the correct system prompt
+                # in the store without needing to scan back past the boundary.
+                # If refresh_skills ran since boot, system_msg is already the
+                # updated version — dispatching it keeps JSONL and in-memory
+                # store consistent.
+                await self._dispatch(system_msg)
 
             await self._dispatch(
                 CompactBoundaryMessage(
@@ -604,6 +612,14 @@ class QueryEngine:
         Keeps the most recent tool-result group intact (the LLM needs
         those to reason). Earlier tool outputs are large and no longer
         useful; collapsing them reclaims context budget.
+
+        MUTATION CONTRACT: this method intentionally mutates ToolResultMessage
+        .content and .output on live store objects so that api_view() returns
+        "[Cleared]" for those slots. Consumers must NOT cache .content or
+        .output after dispatch — by the time this runs, dispatch has already
+        completed (TUI rendered the full result; JSONL captured the original
+        content as append-only). Future replay reads the JSONL originals, not
+        these mutated objects.
         """
         branch = [
             m
