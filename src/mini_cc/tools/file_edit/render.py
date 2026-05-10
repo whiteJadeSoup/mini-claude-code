@@ -7,6 +7,8 @@ def render_received(args: dict) -> str:
 
 def render_complete(args: dict, output: ToolOutput | None) -> str:
     path = args.get("path", "")
-    if not isinstance(output, FileEditOutput):
-        return path
-    return f"{path} · edited" if output.replaced else f"{path} · not found"
+    if isinstance(output, FileEditOutput) and output.replaced:
+        if output.replace_count > 1:
+            return f"{path} · edited ({output.replace_count})"
+        return f"{path} · edited"
+    return path

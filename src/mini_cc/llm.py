@@ -34,6 +34,6 @@ _llm_base = ChatOpenAI(
 
 SUB_TOOLS = [_lc(n) for n in (
     "plan_todos", "update_todo", "plan_tasks", "update_task",
-    "execute_command", "write_file", "edit_file",
+    "execute_command", "file_read", "file_write", "file_edit",
 )]
 MAIN_TOOLS = [_lc("task"), _lc("run_skill")] + SUB_TOOLS

@@ -59,16 +59,28 @@ class CommandOutput(ToolOutput):
 class FileWriteOutput(ToolOutput):
     type: Literal["file_write"] = "file_write"
     path: str
+    operation: Literal["create", "update"]
     bytes_written: int
+    # Rich data for UI v2+ — NOT exposed via to_api_str
+    content: str = ""
+    original_content: str | None = None       # None for create
 
     def to_api_str(self) -> str:
-        return f"Written {self.bytes_written} bytes to {self.path}"
+        # Aligned with CC FileWriteTool.ts:418-432
+        if self.operation == "create":
+            return f"File created successfully at: {self.path}"
+        return f"The file {self.path} has been updated successfully."
 
 
 class FileEditOutput(ToolOutput):
     type: Literal["file_edit"] = "file_edit"
     path: str
     replaced: bool
+    replace_count: int = 0
+    # Rich data for UI v2+ — NOT exposed via to_api_str
+    old_string: str = ""
+    new_string: str = ""
+    original_content: str = ""
 
     @model_validator(mode="after")
     def _derive_is_error(self) -> "FileEditOutput":
@@ -76,9 +88,40 @@ class FileEditOutput(ToolOutput):
         return self
 
     def to_api_str(self) -> str:
-        if self.replaced:
-            return f"Edited {self.path}"
-        return f"Error: old_string not found in {self.path}"
+        # Aligned with CC FileEditTool.ts:581-593
+        if not self.replaced:
+            return f"Error: edit not applied to {self.path}"
+        if self.replace_count > 1:
+            return (f"The file {self.path} has been updated. "
+                    f"All occurrences were successfully replaced.")
+        return f"The file {self.path} has been updated successfully."
+
+
+class FileReadOutput(ToolOutput):
+    type: Literal["file_read"] = "file_read"
+    path: str
+    content: str = ""                # cat -n line-numbered text; empty when unchanged=True
+    total_lines: int = 0
+    start_line: int = 1              # 1-based starting line of this slice
+    returned_lines: int = 0
+    truncated_by_limit: bool = False
+    unchanged: bool = False          # G6 dedup hit (path/offset/limit/mtime all unchanged)
+
+    def to_api_str(self) -> str:
+        # Plain text only — no <system-reminder> tag (CC uses it because its
+        # system prompt teaches the LLM how to read the tag; mini-cc's prompts.py
+        # has no such convention, so wrapping in the tag would invent a protocol.)
+        if self.unchanged:
+            # Aligned with CC `FILE_UNCHANGED_STUB` (FileReadTool/prompt.ts:7-8)
+            return ("File unchanged since last read. The content from the earlier "
+                    "file_read tool_result in this conversation is still current — "
+                    "refer to that instead of re-reading.")
+        if self.total_lines == 0:
+            return f"File is empty: {self.path}"
+        if self.returned_lines == 0:
+            return (f"File has {self.total_lines} lines; "
+                    f"offset {self.start_line} is beyond the end.")
+        return self.content
 
 
 class TodoPlanOutput(ToolOutput):

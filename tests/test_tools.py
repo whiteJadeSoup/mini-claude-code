@@ -39,19 +39,35 @@ class TestToolOutput:
         out = CommandOutput(stdout="", returncode=0)
         assert out.to_api_str() == "(no output)"
 
-    def test_file_write_output_to_api_str(self):
-        out = FileWriteOutput(path="app.py", bytes_written=1024)
-        assert "1024" in out.to_api_str()
-        assert "app.py" in out.to_api_str()
+    def test_file_write_output_to_api_str_create(self):
+        out = FileWriteOutput(path="app.py", operation="create", bytes_written=1024)
+        api = out.to_api_str()
+        assert "created successfully" in api
+        assert "app.py" in api
 
-    def test_file_edit_output_replaced(self):
-        out = FileEditOutput(path="app.py", replaced=True)
-        assert "Edited" in out.to_api_str()
-        assert "app.py" in out.to_api_str()
+    def test_file_write_output_to_api_str_update(self):
+        out = FileWriteOutput(path="app.py", operation="update", bytes_written=1024)
+        api = out.to_api_str()
+        assert "updated successfully" in api
+        assert "app.py" in api
+
+    def test_file_edit_output_replaced_single(self):
+        out = FileEditOutput(path="app.py", replaced=True, replace_count=1)
+        api = out.to_api_str()
+        assert "updated successfully" in api
+        assert "app.py" in api
+
+    def test_file_edit_output_replaced_all(self):
+        out = FileEditOutput(path="app.py", replaced=True, replace_count=4)
+        api = out.to_api_str()
+        assert "All occurrences" in api
+        assert "app.py" in api
 
     def test_file_edit_output_not_replaced(self):
         out = FileEditOutput(path="app.py", replaced=False)
-        assert "not found" in out.to_api_str()
+        api = out.to_api_str()
+        assert "Error" in api
+        assert "app.py" in api
 
     def test_todo_plan_output(self):
         out = TodoPlanOutput(count=3, rendered="- a\n- b\n- c")
@@ -121,7 +137,7 @@ class TestOutputTypeSerialization:
         instances = [
             ToolErrorOutput(message="x"),
             CommandOutput(stdout="x", returncode=0),
-            FileWriteOutput(path="p", bytes_written=0),
+            FileWriteOutput(path="p", operation="create", bytes_written=0),
             FileEditOutput(path="p", replaced=True),
             TodoPlanOutput(count=0, rendered=""),
             TodoUpdateOutput(item="i", status="done", rendered=""),
@@ -168,9 +184,9 @@ class TestOutputTypeSerialization:
         assert type(reconstructed) is ToolOutput
 
     def test_all_concrete_subtypes_auto_registered(self):
-        # __init_subclass__ must have registered exactly the 10 concrete types.
+        # __init_subclass__ must have registered exactly the 11 concrete types.
         expected = {
-            "error", "command", "file_write", "file_edit",
+            "error", "command", "file_read", "file_write", "file_edit",
             "todo_plan", "todo_update", "task_plan", "task_update",
             "run_skill", "sub_task",
         }
