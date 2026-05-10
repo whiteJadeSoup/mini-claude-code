@@ -184,9 +184,13 @@ class TestOutputTypeSerialization:
         assert type(reconstructed) is ToolOutput
 
     def test_all_concrete_subtypes_auto_registered(self):
-        # __init_subclass__ must have registered exactly the 11 concrete types.
+        # __init_subclass__ registers all concrete ToolOutput types regardless
+        # of whether the corresponding tool is registered (e.g. grep/glob output
+        # types are registered the moment base.py is imported, not gated on
+        # config.RG_PATH — that gate only governs MiniTool registration).
         expected = {
             "error", "command", "file_read", "file_write", "file_edit",
+            "grep", "glob",
             "todo_plan", "todo_update", "task_plan", "task_update",
             "run_skill", "sub_task",
         }

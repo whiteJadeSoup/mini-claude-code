@@ -20,6 +20,11 @@ def _find_bash() -> str | None:
 
 BASH_PATH = _find_bash()
 
+# ripgrep gate for grep/glob tools. None means rg is not on PATH; the tools
+# are not registered in that case and the LLM must fall back to
+# execute_command("rg ..."). No env override (one-line detection by design).
+RG_PATH = shutil.which("rg")
+
 
 def safe_path(path: str) -> str:
     """Resolve path relative to CWD and reject escapes.
@@ -34,3 +39,18 @@ def safe_path(path: str) -> str:
     if not resolved_norm.startswith(cwd_norm + os.sep) and resolved_norm != cwd_norm:
         raise ValueError(f"Path {path} is outside working directory")
     return resolved
+
+
+def relativize(path: str) -> str:
+    """Turn an absolute path into a CWD-relative form for output.
+
+    grep/glob emit paths to the LLM; relative paths cost fewer tokens and
+    match how the user thinks about the project. Falls back to the input
+    unchanged for paths outside CWD (e.g. symlinks resolved elsewhere).
+    """
+    try:
+        rel = os.path.relpath(path, CWD)
+    except ValueError:
+        # Different drives on Windows — relpath raises; return path as-is.
+        return path
+    return rel if not rel.startswith("..") else path

@@ -127,6 +127,69 @@ class FileReadOutput(ToolOutput):
         return self.content
 
 
+class GrepOutput(ToolOutput):
+    type: Literal["grep"] = "grep"
+    mode: Literal["content", "files_with_matches", "count"]
+    num_files: int
+    filenames: list[str] = []                # Empty in content/count modes
+    content: str = ""                        # Set in content/count modes
+    num_matches: int = 0                     # Set in count mode (sum across files)
+    applied_limit: int | None = None         # Filled only when truncation kicked in
+    applied_offset: int = 0
+
+    def to_api_str(self) -> str:
+        # Aligned with CC GrepTool.ts:254-308 mapToolResultToToolResultBlockParam
+        if self.mode == "content":
+            body = self.content or "No matches found"
+            paging = self._paging_hint()
+            return f"{body}\n\n{paging}" if paging else body
+        if self.mode == "count":
+            paging = self._paging_hint()
+            files_word = "file" if self.num_files == 1 else "files"
+            occ_word = "occurrence" if self.num_matches == 1 else "occurrences"
+            summary = (
+                f"\n\nFound {self.num_matches} total {occ_word} "
+                f"across {self.num_files} {files_word}."
+            )
+            if paging:
+                summary += f" with pagination = {paging}"
+            return (self.content or "No matches found") + summary
+        # files_with_matches
+        if self.num_files == 0:
+            return "No files found"
+        paging = self._paging_hint()
+        files_word = "file" if self.num_files == 1 else "files"
+        header = f"Found {self.num_files} {files_word}"
+        if paging:
+            header += f" {paging}"
+        return f"{header}\n" + "\n".join(self.filenames)
+
+    def _paging_hint(self) -> str:
+        parts = []
+        if self.applied_limit is not None:
+            parts.append(f"limit: {self.applied_limit}")
+        if self.applied_offset:
+            parts.append(f"offset: {self.applied_offset}")
+        return ", ".join(parts)
+
+
+class GlobOutput(ToolOutput):
+    type: Literal["glob"] = "glob"
+    filenames: list[str] = []        # CWD-relative paths
+    num_files: int
+    truncated: bool = False          # True when matches > GLOB_CAP
+    duration_ms: int
+
+    def to_api_str(self) -> str:
+        # Aligned with CC GlobTool.ts:177-197
+        if not self.filenames:
+            return "No files found"
+        body = "\n".join(self.filenames)
+        if self.truncated:
+            body += "\n(Results are truncated. Consider using a more specific path or pattern.)"
+        return body
+
+
 class TodoPlanOutput(ToolOutput):
     type: Literal["todo_plan"] = "todo_plan"
     count: int
