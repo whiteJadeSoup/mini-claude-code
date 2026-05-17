@@ -12,6 +12,7 @@ class TaskTool(MiniTool):
     async def _run(self, description: str) -> SubTaskOutput:
         # Lazy imports: same circular-dep rationale as run_skill
         from mini_cc.engine.query_engine import get_engine
+        from mini_cc.engine.sandbox import SUB_AGENT_SANDBOX
         from mini_cc.engine.store import _triggering_asst_id
 
         parent_id = _triggering_asst_id.get()
@@ -23,6 +24,7 @@ class TaskTool(MiniTool):
             system_prompt=prompts.SUB_SYSTEM_PROMPT,
             user_prompt=description,
             label="task",
+            sandbox=SUB_AGENT_SANDBOX,
         )
         return SubTaskOutput(result=result)
 

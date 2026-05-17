@@ -21,6 +21,7 @@ class RunSkillTool(MiniTool):
         # Lazy imports: query_engine imports tools indirectly via tool lists;
         # importing at call time avoids circular deps at module load.
         from mini_cc.engine.query_engine import get_engine
+        from mini_cc.engine.sandbox import SUB_AGENT_SANDBOX
         from mini_cc.engine.store import _triggering_asst_id
 
         parent_id = _triggering_asst_id.get()
@@ -36,6 +37,7 @@ class RunSkillTool(MiniTool):
             system_prompt=body,
             user_prompt=user_content,
             label=f"skill:{name}",
+            sandbox=SUB_AGENT_SANDBOX,
         )
         return RunSkillOutput(skill_name=name, result=result)
 

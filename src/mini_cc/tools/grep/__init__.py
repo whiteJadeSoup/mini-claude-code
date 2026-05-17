@@ -33,6 +33,7 @@ class GrepTool(MiniTool):
     name = "grep"
     description = "Search file contents with regex (ripgrep)"
     prompt = PROMPT
+    is_read_only = True
 
     async def _run(
         self,

@@ -62,6 +62,11 @@ class MiniTool(ABC):
     description: str    # human-facing label, shown in UI
     prompt: str         # model-facing: use-when / don't-use-for / examples
     concurrency: bool = False   # placeholder; always False
+    # Whether this tool is purely read-only (no filesystem mutation, no subprocess
+    # spawn, no external side effects). Consumed by sandbox policies that want to
+    # express "read-only context" without hard-coding tool names — e.g. a memory
+    # extraction sub-agent that allows arbitrary read tools but gates writes.
+    is_read_only: bool = False
 
     @abstractmethod
     async def _run(self, **kwargs) -> ToolOutput:

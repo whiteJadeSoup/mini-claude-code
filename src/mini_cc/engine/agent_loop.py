@@ -34,6 +34,7 @@ from mini_cc.engine.messages import (
     ToolUseBlock,
     assistant_messages_from_ai,
 )
+from mini_cc.engine.sandbox import Allow, Deny, Sandbox, allow_all
 from mini_cc.engine.store import _triggering_asst_id
 from mini_cc.state import usage
 from mini_cc.tools.base import (
@@ -57,6 +58,8 @@ class AgentLoop:
         get_messages: Callable[[], Awaitable[list[BaseMessage]]],
         parent_id: str | None = None,
         source: str = "agent",
+        *,
+        sandbox: Sandbox = allow_all(),
     ) -> AsyncIterator[Message]:
         """Run one multi-step turn; yield every produced message.
 
@@ -70,6 +73,11 @@ class AgentLoop:
             source: usage-tracking label; updated to "tool: X, Y" after
                 each tool-dispatch step so subsequent LLM calls are
                 attributed to their trigger.
+            sandbox: per-call authorization gate. Every tool invocation is
+                checked before execution; denied calls produce a synthetic
+                error tool_result (without running the tool) so the LLM
+                sees the rejection and can self-correct. Defaults to
+                `allow_all()` — the main agent runs unrestricted.
         """
         while True:
             messages = await get_messages()
@@ -112,7 +120,9 @@ class AgentLoop:
 
             for tc in full_response.tool_calls:
                 name = tc["name"]
+                args = tc["args"]
                 tool_fn = self._tools.get(name)
+                mini = get_tool(name)
                 # Locate the AssistantMessage that carried this tool_use —
                 # its id becomes parent_id for any sidechain the tool spawns.
                 trigger = next(
@@ -133,27 +143,53 @@ class AgentLoop:
                     )
                     content = output.to_api_str()
                 else:
-                    token = _triggering_asst_id.set(
-                        trigger.id if trigger else None
+                    # Sandbox gate. Skipped when `mini` is None (the tool was
+                    # registered as a raw LangChain BaseTool, not a MiniTool —
+                    # the gate needs MiniTool metadata to decide). In practice
+                    # all mini-cc tools are MiniTools, so this fallback is
+                    # defensive rather than load-bearing.
+                    decision = (
+                        await sandbox.check(mini, args)
+                        if mini is not None
+                        else None
                     )
-                    try:
-                        # MiniTools: execute() never throws; validation errors
-                        # return a str via handle_validation_error callback.
-                        # NOTE: tools must not read _triggering_asst_id via
-                        # asyncio.create_task — the ContextVar is reset in the
-                        # finally block below, before any detached task runs.
-                        raw = await tool_fn.ainvoke(tc["args"])
-                    finally:
-                        _triggering_asst_id.reset(token)
-
-                    mini = get_tool(name)
-                    if mini is not None and isinstance(raw, ToolOutput):
-                        content = mini.to_api_content(raw)
-                        output = raw
+                    if isinstance(decision, Deny):
+                        output = ToolErrorOutput(
+                            message=(
+                                f"[sandbox:{sandbox.name}] "
+                                f"denied: {decision.reason}"
+                            )
+                        )
+                        content = output.to_api_str()
                     else:
-                        content = str(raw)
-                        # validation error returns str; wrap so TUI shows red ●
-                        output = ToolErrorOutput(message=content) if mini is not None else None
+                        # Allow (or skipped). Apply rewritten args if any.
+                        if (
+                            isinstance(decision, Allow)
+                            and decision.updated_args is not None
+                        ):
+                            args = decision.updated_args
+
+                        token = _triggering_asst_id.set(
+                            trigger.id if trigger else None
+                        )
+                        try:
+                            # MiniTools: execute() never throws; validation
+                            # errors return a str via handle_validation_error
+                            # callback. NOTE: tools must not read
+                            # _triggering_asst_id via asyncio.create_task —
+                            # the ContextVar is reset in the finally block
+                            # below, before any detached task runs.
+                            raw = await tool_fn.ainvoke(args)
+                        finally:
+                            _triggering_asst_id.reset(token)
+
+                        if mini is not None and isinstance(raw, ToolOutput):
+                            content = mini.to_api_content(raw)
+                            output = raw
+                        else:
+                            content = str(raw)
+                            # validation error returns str; wrap so TUI shows red ●
+                            output = ToolErrorOutput(message=content) if mini is not None else None
 
                 # Spill oversized content to disk before it enters the store;
                 # `output` keeps the full ToolOutput so the UI still renders

@@ -37,6 +37,7 @@ from mini_cc.engine.compact import (
     _parse_context_gap_tokens,
     run_compact,
 )
+from mini_cc.engine.sandbox import Sandbox, allow_all
 from mini_cc.engine.messages import (
     AssistantMessage,
     Message,
@@ -212,6 +213,57 @@ class QueryEngine:
 
     # -- turn entries -------------------------------------------------------
 
+    async def run_loop(
+        self,
+        *,
+        parent_id: str | None,
+        source: str,
+        sandbox: Sandbox = allow_all(),
+        is_sub_agent: bool = False,
+    ) -> str | None:
+        """Run agent loop iterations, dispatching each yielded message.
+
+        The shared core of `query()` and `run_sidechain()`. Callers own
+        any wrapping work — seed messages (User/SystemPrompt), retry on
+        context overflow, `_sub_agent_scope` setup. This method just
+        drives `AgentLoop.run` and routes messages to consumers.
+
+        Args:
+            parent_id: None for main branch; an AssistantMessage id for
+                sidechains.
+            source: usage-tracking label propagated into every emitted
+                message.
+            sandbox: per-call tool authorization gate. Default
+                `allow_all()` matches the historical unrestricted
+                behavior; sub-agent launch points pass a narrower gate.
+            is_sub_agent: selects the pre-built AgentLoop — False uses
+                `_main_loop` (full MAIN_TOOLS, includes task/run_skill);
+                True uses `_sub_loop` (SUB_TOOLS, excludes task/run_skill
+                to prevent recursion at the schema level — sandbox can
+                still further restrict).
+
+        Returns the last TextBlock text emitted by an AssistantMessage,
+        or None if the loop ended without producing text. Used by
+        sub-agents to surface their final answer as a tool_result.
+        """
+        loop = self._sub_loop if is_sub_agent else self._main_loop
+        last_text: str | None = None
+        async for msg in loop.run(
+            get_messages=lambda: self._prepare_messages(parent_id=parent_id),
+            parent_id=parent_id,
+            source=source,
+            sandbox=sandbox,
+        ):
+            await self._dispatch(msg)
+            # Track the most recent TextBlock so sub-agents can return it
+            # as the tool result. The loop returns after a no-tool-call
+            # response, so the last TextBlock is the final answer.
+            if isinstance(msg, AssistantMessage) and isinstance(
+                msg.content, TextBlock
+            ):
+                last_text = msg.content.text
+        return last_text
+
     async def query(self, user_text: str) -> None:
         """Run one main-branch turn.
 
@@ -227,12 +279,11 @@ class QueryEngine:
         try:
             for attempt in range(2):
                 try:
-                    async for msg in self._main_loop.run(
-                        get_messages=lambda: self._prepare_messages(parent_id=None),
+                    await self.run_loop(
                         parent_id=None,
                         source="agent",
-                    ):
-                        await self._dispatch(msg)
+                        is_sub_agent=False,
+                    )
                     break  # success
                 except Exception as e:
                     if attempt == 0 and _is_context_exceeded(e):
@@ -274,6 +325,8 @@ class QueryEngine:
         system_prompt: str,
         user_prompt: str,
         label: str,
+        *,
+        sandbox: Sandbox = allow_all(),
     ) -> str:
         """Run a sub-agent on a sidechain branch; return final text.
 
@@ -282,12 +335,16 @@ class QueryEngine:
         `ainvoke`, and you cannot yield through an awaited call. The
         tool's return value (the last TextBlock's text) becomes the main
         branch's ToolResultMessage content.
+
+        `sandbox` is the per-call tool authorization gate for this
+        sub-agent. Defaults to `allow_all()` (preserving the prior
+        unrestricted behavior); a launch point with restricted intent
+        (e.g. memory extraction) should pass a narrower sandbox.
         """
         # Lazy import: tools.py imports this module (via get_engine),
         # and we need _sub_agent_scope from tools without a cycle at load.
         from mini_cc.tools._utils import _sub_agent_scope
 
-        last_text: str | None = None
         with _sub_agent_scope(label):
             await self._dispatch(
                 SystemPromptMessage(
@@ -302,19 +359,12 @@ class QueryEngine:
                     source=label,
                 )
             )
-            async for msg in self._sub_loop.run(
-                get_messages=lambda: self._prepare_messages(parent_id=parent_id),
+            last_text = await self.run_loop(
                 parent_id=parent_id,
                 source=label,
-            ):
-                await self._dispatch(msg)
-                # Track the most recent TextBlock so we can return it as
-                # the tool result. The loop returns after a no-tool-call
-                # response, so the last TextBlock is the final answer.
-                if isinstance(msg, AssistantMessage) and isinstance(
-                    msg.content, TextBlock
-                ):
-                    last_text = msg.content.text
+                sandbox=sandbox,
+                is_sub_agent=True,
+            )
         return last_text or "(completed, no summary)"
 
     # -- compact ------------------------------------------------------------

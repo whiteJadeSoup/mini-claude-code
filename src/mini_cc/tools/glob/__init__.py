@@ -32,6 +32,7 @@ class GlobTool(MiniTool):
     name = "glob"
     description = "Find files by name pattern (ripgrep)"
     prompt = PROMPT
+    is_read_only = True
 
     async def _run(
         self,

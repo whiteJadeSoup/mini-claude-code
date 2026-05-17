@@ -31,6 +31,7 @@ class FileReadTool(MiniTool):
     name = "file_read"
     description = "Read a file from the filesystem with cat -n line numbers"
     prompt = PROMPT
+    is_read_only = True
 
     async def _run(
         self,
