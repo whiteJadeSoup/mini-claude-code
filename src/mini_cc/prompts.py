@@ -55,7 +55,10 @@ def build_system_prompt(
 ) -> str:
     """Build the main agent system prompt.
 
-    Rebuilt each turn so newly discovered skills appear.
+    Rebuilt each turn so newly discovered skills appear. The output is a
+    three-section markdown document: `# Agent` (identity + tool-use mode),
+    `# Tools & Skills` (priority table, per-tool guidance, workflow, skills),
+    `# auto memory` (the persistent memory-system instructions).
 
     `available_tools` controls Layer-1 priority table rendering and per-tool
     section gating. Default reads from the live registry — pass an explicit
@@ -68,16 +71,19 @@ def build_system_prompt(
     has_grep = "grep" in available_tools
     has_glob = "glob" in available_tools
 
-    sections: list[str] = []
-    sections.append(f"You are a coding agent in: {config.CWD}")
-    sections.append(_platform_line())
-    sections.append(
-        "Answer questions and chat normally without tools. Use tools only when "
-        "the task actually requires running code, reading files, or taking action "
-        "— not for simple questions or greetings."
-    )
-    sections.append("")
-    sections.append(_priority_table(available_tools))
+    # ── Section 1: # Agent ────────────────────────────────────────────────
+    agent_section = "\n\n".join([
+        "# Agent",
+        f"You are a coding agent in: {config.CWD}\n{_platform_line()}",
+        (
+            "Answer questions and chat normally without tools. Use tools only when "
+            "the task actually requires running code, reading files, or taking action "
+            "— not for simple questions or greetings."
+        ),
+    ])
+
+    # ── Section 2: # Tools & Skills ───────────────────────────────────────
+    sections: list[str] = ["# Tools & Skills", _priority_table(available_tools)]
 
     if has_grep and has_glob:
         # Discovery-first workflow guard.
@@ -165,7 +171,17 @@ def build_system_prompt(
         "Domain knowledge: use run_skill to execute skills in isolated context."
     )
 
-    return "\n\n".join(s.rstrip() for s in sections if s) + skill_section
+    tools_section = "\n\n".join(s.rstrip() for s in sections if s) + skill_section
+
+    # ── Section 3: # auto memory ──────────────────────────────────────────
+    # get_auto_mem_path() is @cache'd and mkdir-p's on first call, so this
+    # one call both triggers the directory creation that backs the prompt's
+    # "already exists" claim and yields the absolute path we inline.
+    from mini_cc.memdir import get_auto_mem_path
+    from mini_cc.memory_prompt import build_memory_prompt
+    memory_section = build_memory_prompt(get_auto_mem_path())
+
+    return "\n\n".join([agent_section, tools_section, memory_section])
 
 
 SUB_SYSTEM_PROMPT = (

@@ -180,3 +180,83 @@ def test_TP08_full_render_both_states_clean():
         return rest[:end]
     assert _table_block(sp_no_rg).count("→") == 4   # 4 dedicated tools when no rg
     assert _table_block(sp_rg).count("→") == 6      # +grep, +glob
+
+
+# ---------------------------------------------------------------------------
+# TP09: three-section structure (# Agent / # Tools & Skills / # auto memory)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def isolated_memdir(tmp_path, monkeypatch):
+    """Reroute memdir to tmp_path and clear the @cache so each test gets a
+    fresh derivation. Without this, build_system_prompt would touch the real
+    ~/.minicc/ on the developer's machine."""
+    from pathlib import Path
+
+    from mini_cc.memdir import paths as memdir_paths
+
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    memdir_paths.get_auto_mem_path.cache_clear()
+    yield tmp_path
+    memdir_paths.get_auto_mem_path.cache_clear()
+
+
+def test_TP09_three_top_level_sections_in_order(isolated_memdir):
+    sp = build_system_prompt("", available_tools={
+        "file_read", "file_write", "file_edit", "execute_command",
+    })
+    p_agent = sp.find("# Agent")
+    p_tools = sp.find("# Tools & Skills")
+    p_memory = sp.find("# auto memory")
+    assert p_agent != -1, "missing # Agent header"
+    assert p_tools != -1, "missing # Tools & Skills header"
+    assert p_memory != -1, "missing # auto memory header"
+    assert p_agent < p_tools < p_memory, (
+        f"section order wrong: Agent@{p_agent}, Tools@{p_tools}, Memory@{p_memory}"
+    )
+
+
+def test_TP09b_memory_section_appears_after_skill_section(isolated_memdir):
+    """Skill section must stay inside # Tools & Skills, before # auto memory.
+    If a future change moves skill_section to the tail, the LLM would read
+    skill prompts as part of memory instructions."""
+    skill_marker = "<<<SKILL_SECTION_MARKER>>>"
+    sp = build_system_prompt(
+        skill_section=skill_marker,
+        available_tools={"file_read", "file_write", "file_edit", "execute_command"},
+    )
+    assert skill_marker in sp
+    assert sp.find(skill_marker) < sp.find("# auto memory")
+
+
+def test_TP09c_inlined_memdir_path_matches_get_auto_mem_path(isolated_memdir):
+    """Self-consistency invariant: the path the prompt tells the LLM to
+    write to must equal the path safe_path's whitelist resolves. If these
+    drift, the LLM follows the prompt, file_write rejects, and the user
+    sees "outside working directory or memdir" for paths the prompt just
+    sanctioned."""
+    from mini_cc.memdir import get_auto_mem_path
+
+    sp = build_system_prompt("", available_tools={
+        "file_read", "file_write", "file_edit", "execute_command",
+    })
+    expected = str(get_auto_mem_path())
+    assert expected in sp
+
+
+def test_TP09d_memdir_actually_exists_after_build(isolated_memdir):
+    """The prompt claims `This directory already exists`. That claim must be
+    backed by a real mkdir at prompt-construction time — otherwise the LLM
+    follows the prompt, file_write tries to create the parent, and may fail
+    or surface a confusing 'no such directory' error before the whitelist
+    check even runs."""
+    from mini_cc.memdir import get_auto_mem_path
+
+    build_system_prompt("", available_tools={
+        "file_read", "file_write", "file_edit", "execute_command",
+    })
+    assert get_auto_mem_path().exists(), (
+        "build_system_prompt must trigger memdir mkdir so the prompt's "
+        "'already exists' claim is true"
+    )

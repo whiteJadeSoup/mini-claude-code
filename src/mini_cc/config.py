@@ -33,18 +33,30 @@ RG_PATH: str | None = str(_VENDOR_RG) if _VENDOR_RG.is_file() else None
 
 
 def safe_path(path: str) -> str:
-    """Resolve path relative to CWD and reject escapes.
+    """Resolve path relative to CWD and reject escapes, with a memdir whitelist.
 
-    Prevents the LLM from reading/writing outside the project via
-    path traversal (e.g. ../../etc/passwd).
+    Two zones are writable: the project CWD subtree (sandbox), and the
+    auto-memory directory subtree (~/.minicc/projects/<slug>/memory/, derived
+    by mini_cc.memdir.get_auto_mem_path). The memdir whitelist exists because
+    the system prompt instructs the LLM to write memory files there with
+    file_write — without this carve-out the sandbox would reject every memory
+    write and the prompt would be a lie.
     """
     resolved = os.path.realpath(os.path.join(CWD, path))
     # normcase for Windows case-insensitive comparison (no-op on Unix)
     resolved_norm = os.path.normcase(resolved)
     cwd_norm = os.path.normcase(CWD)
-    if not resolved_norm.startswith(cwd_norm + os.sep) and resolved_norm != cwd_norm:
-        raise ValueError(f"Path {path} is outside working directory")
-    return resolved
+    if resolved_norm == cwd_norm or resolved_norm.startswith(cwd_norm + os.sep):
+        return resolved
+
+    # Lazy: avoid import-time git rev-parse subprocess. get_auto_mem_path is
+    # @cache'd so this is one subprocess per process; ~0ms after the first call.
+    from mini_cc.memdir import get_auto_mem_path
+    memdir_norm = os.path.normcase(str(get_auto_mem_path()))
+    if resolved_norm == memdir_norm or resolved_norm.startswith(memdir_norm + os.sep):
+        return resolved
+
+    raise ValueError(f"Path {path} is outside working directory or memdir")
 
 
 def relativize(path: str) -> str:
