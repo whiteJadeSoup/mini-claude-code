@@ -80,6 +80,15 @@ def build_system_prompt(
             "the task actually requires running code, reading files, or taking action "
             "— not for simple questions or greetings."
         ),
+        # B-0: declare the <system-reminder> protocol ONCE here. Channel B-1
+        # (memory index) and any future injected context reuse this contract
+        # instead of re-declaring it. Without this, the model can mistake the
+        # injected context message for something the user actually typed.
+        (
+            "Tool results and user messages may include <system-reminder> or other "
+            "tags. Tags contain information from the system. They bear no direct "
+            "relation to the specific tool results or user messages in which they appear."
+        ),
     ])
 
     # ── Section 2: # Tools & Skills ───────────────────────────────────────
