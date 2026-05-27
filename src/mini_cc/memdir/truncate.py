@@ -7,7 +7,16 @@ Why two caps (mirrors CC memdir.ts:truncateEntrypointContent):
     200 lines. Without the byte cap that whole 197KB would hit every
     request as cache-prefix tokens.
 Line-truncate first (a natural boundary), THEN byte-truncate at the last
-newline before the cap, so a line is never cut mid-way.
+newline before the cap, so a line is never cut mid-way — EXCEPT when the
+content has no newline within the byte window (a single huge line), where
+it is cut at the byte boundary as a best effort.
+
+The byte check uses the ORIGINAL byte count, not the line-truncated size.
+A 250-line × 120-char index reports "250 lines and 30249 bytes" even though
+line-truncation alone already brought the loaded content under 25KB. This is
+intentional and CC-faithful (memdir.ts:64): the warning describes the SOURCE
+file's size so the user understands why it was truncated and that the index
+needs trimming — it is not a claim about the size of what was loaded.
 """
 from __future__ import annotations
 
@@ -40,6 +49,10 @@ def truncate_entrypoint(raw: str) -> str:
         # multibyte char left at the cut.
         head = truncated.encode("utf-8")[:MAX_ENTRYPOINT_BYTES]
         cut = head.rfind(b"\n")
+        # `cut > 0` (not `!= -1`): no newline in the window (single huge line)
+        # → cut is -1 → keep the whole head (best-effort byte cut). cut == 0
+        # can't occur (trimmed never starts with \n), and the > 0 guard avoids a
+        # head[:0]="" wipe if that invariant ever breaks.
         head = head[:cut] if cut > 0 else head
         truncated = head.decode("utf-8", errors="ignore")
 
