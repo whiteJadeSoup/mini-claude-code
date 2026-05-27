@@ -25,7 +25,14 @@ def _neutralize_reminder_tags(text: str) -> str:
     prematurely closing the injected <system-reminder> block. Escape the
     angle brackets so the model reads it as literal text, not structure.
     Not hypothetical: this project's own memory is ABOUT memory internals,
-    so '</system-reminder>' really can appear in the index."""
+    so '</system-reminder>' really can appear in the index.
+
+    Case-sensitive by design: only lowercase tags are neutralized, matching
+    how the tag is emitted/read. A mixed-case '</System-Reminder>' in the
+    index is left as ordinary prose (not treated as a closing tag).
+
+    Replacement order is irrelevant — the two patterns share no substring
+    overlap ('</...>' has a '/' where '<...>' does not)."""
     return (
         text.replace("</system-reminder>", "&lt;/system-reminder&gt;")
             .replace("<system-reminder>", "&lt;system-reminder&gt;")
@@ -51,7 +58,12 @@ def build_memory_context(memory_dir: Path) -> str | None:
 def render_user_context(context: dict[str, str]) -> str:
     """Outer layer: wrap a {key: value} dict into one <system-reminder>
     block, iterating keys in insertion order. Empty dict → "" so the caller
-    can skip dispatching an empty message."""
+    can skip dispatching an empty message.
+
+    Precondition: values are non-None strings. The caller filters absent
+    context BEFORE calling (e.g. `if mem := build_memory_context(...): ctx["memory"] = mem`).
+    A None value would render the literal "None"; by design we do NOT guard
+    here, so a None leak surfaces as a visible bug rather than vanishing."""
     if not context:
         return ""
     body = "\n".join(f"# {key}\n{value}" for key, value in context.items())

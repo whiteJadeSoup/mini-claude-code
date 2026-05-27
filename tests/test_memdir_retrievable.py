@@ -91,6 +91,16 @@ def test_build_memory_context_neutralizes_reminder_tags(tmp_path):
     assert "&lt;/system-reminder&gt;" in value
 
 
+def test_build_memory_context_neutralizes_opening_reminder_tag(tmp_path):
+    # The OPENING tag can also appear in index content (a note about the block
+    # structure); _neutralize handles it too — pin that branch against regression.
+    _write_memory_index(tmp_path, "- the <system-reminder> block lives at messages[0]")
+    value = build_memory_context(tmp_path)
+    assert value is not None
+    assert "<system-reminder>" not in value
+    assert "&lt;system-reminder&gt;" in value
+
+
 def test_render_user_context_empty_dict_returns_empty():
     assert render_user_context({}) == ""
 
