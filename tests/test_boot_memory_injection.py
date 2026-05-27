@@ -7,7 +7,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from mini_cc.engine import query_engine as qe_mod
 from mini_cc.engine.query_engine import QueryEngine
-from mini_cc.engine.messages import AssistantMessage
+from mini_cc.engine.messages import AssistantMessage, UserMessage
 
 
 def _engine() -> QueryEngine:
@@ -68,3 +68,8 @@ async def test_boot_then_api_view_merges_into_single_human_preamble(monkeypatch,
     assert "Contents of MEMORY.md" in merged
     assert "TASK STATE BLOCK" in merged
     assert not any(isinstance(m, AIMessage) for m in view)
+    # The store holds the two synthetic users SEPARATELY (context + task_state);
+    # api_view is what merges them — guards against a refactor that pre-concatenates.
+    synthetic_users = [m for m in engine.store._messages
+                       if isinstance(m, UserMessage) and m.is_synthetic]
+    assert len(synthetic_users) == 2

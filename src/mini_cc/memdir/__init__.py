@@ -6,10 +6,13 @@ Public API surface for the "可存" (storable) layer:
     :func:`get_auto_mem_daily_log_path`, :func:`validate_memory_path`
   - :func:`scan_memory_files`, :func:`format_memory_manifest`
 
-P1-1C wired everything into existence but no caller invokes these yet.
-P2 (可取) will inject scan results into the system prompt; P3 (可写)
-will add user-driven and forked-agent writes; P4 (可久) will add age,
-freshness, and autoDream.
+P1-1C built the storable layer. P2 (可取, this feature) adds dual-channel
+injection: the MEMORY.md index is injected into messages[0] as a
+<system-reminder> context message — NOT the system prompt; keeping it in the
+messages region preserves the system-prompt prefix cache. Built by
+``memdir/injection.py`` (build_memory_context / render_user_context) on top of
+``memdir/truncate.py``. P3 (可写) will add user-driven and forked-agent writes;
+P4 (可久) will add age, freshness, and autoDream.
 """
 from mini_cc.memdir.paths import (
     get_auto_mem_daily_log_path,
