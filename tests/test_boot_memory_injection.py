@@ -40,6 +40,9 @@ async def test_boot_skips_memory_when_none(monkeypatch, fresh_tasks):
     view = engine.store.api_view()
     human = "\n".join(m.content for m in view if isinstance(m, HumanMessage))
     assert "Contents of MEMORY.md" not in human
+    # currentDate is the always-present key — injected even when memory is absent
+    assert "Today's date is" in human
+    assert "# currentDate" in human
 
 
 async def test_boot_task_state_has_no_paired_assistant(monkeypatch, fresh_tasks):

@@ -23,9 +23,8 @@ Why engine owns the store:
 from __future__ import annotations
 
 import sys
-import uuid
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
@@ -184,11 +183,13 @@ class QueryEngine:
                 )
 
     async def boot(self) -> None:
-        """Seed the session with a system prompt and any pending task state.
+        """Seed the session with a system prompt, a channel B-1 context message
+        (currentDate, plus the MEMORY.md index if present), and any pending
+        task state.
 
-        Call this exactly once, after subscribing consumers. The initial
-        system prompt + task-state injection must be visible to
-        persistence and UI, so they go through _dispatch.
+        Call this exactly once, after subscribing consumers. The initial system
+        prompt + context + task-state injection must be visible to persistence
+        and UI, so they go through _dispatch.
         """
         for sub in self._subscriptions:
             await sub.start()
@@ -199,15 +200,19 @@ class QueryEngine:
         # and inject as ONE synthetic UserMessage. Kept in the messages region
         # (not the system prompt) so the system-prompt prefix cache stays stable
         # and the index can evolve without a cache bust.
-        from datetime import date
         context: dict[str, str] = {}
         if mem := build_memory_context(get_auto_mem_path()):
             context["memory"] = mem
         context["currentDate"] = f"Today's date is {date.today().isoformat()}."
         rendered = render_user_context(context)
+        # Defensive: currentDate is always set today, so `rendered` is non-empty.
+        # The guard honors render_user_context's empty-dict→"" contract, so if a
+        # future change makes every key conditional we won't dispatch an empty
+        # <system-reminder>. source="context" (not "memory"): this message is the
+        # whole B-1 block — it carries currentDate even when no memory exists.
         if rendered:
             await self._dispatch(
-                UserMessage(content=rendered, is_synthetic=True, source="memory")
+                UserMessage(content=rendered, is_synthetic=True, source="context")
             )
 
         # task_state: inject the synthetic user message ONLY. No paired
