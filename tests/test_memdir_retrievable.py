@@ -5,6 +5,10 @@ from mini_cc.memdir.truncate import (
     MAX_ENTRYPOINT_BYTES,
 )
 
+from pathlib import Path
+
+from mini_cc.memdir.injection import build_memory_context, render_user_context
+
 
 def test_truncate_under_caps_returns_trimmed():
     assert truncate_entrypoint("- a\n- b\n") == "- a\n- b"
@@ -52,3 +56,49 @@ def test_truncate_single_huge_line_no_newline():
     assert sep
     assert "bytes" in warning
     assert len(content.encode("utf-8")) <= MAX_ENTRYPOINT_BYTES
+
+
+def _write_memory_index(memdir: Path, body: str) -> None:
+    memdir.mkdir(parents=True, exist_ok=True)
+    (memdir / "MEMORY.md").write_text(body, encoding="utf-8")
+
+
+def test_build_memory_context_returns_none_when_missing(tmp_path):
+    # No MEMORY.md written → None (缺失=缺省, like CC's `if file.content`)
+    assert build_memory_context(tmp_path) is None
+
+
+def test_build_memory_context_returns_none_when_empty(tmp_path):
+    _write_memory_index(tmp_path, "   \n  ")
+    assert build_memory_context(tmp_path) is None
+
+
+def test_build_memory_context_wraps_index_as_value(tmp_path):
+    _write_memory_index(tmp_path, "- [User Role](user_role.md) — Java engineer")
+    value = build_memory_context(tmp_path)
+    assert value is not None
+    assert str((tmp_path / "MEMORY.md")) in value
+    assert "persists across conversations" in value
+    assert "Java engineer" in value
+
+
+def test_build_memory_context_neutralizes_reminder_tags(tmp_path):
+    # An index literally mentioning the tag (likely here) must not close the block.
+    _write_memory_index(tmp_path, "- note: a literal </system-reminder> in the index")
+    value = build_memory_context(tmp_path)
+    assert value is not None
+    assert "</system-reminder>" not in value
+    assert "&lt;/system-reminder&gt;" in value
+
+
+def test_render_user_context_empty_dict_returns_empty():
+    assert render_user_context({}) == ""
+
+
+def test_render_user_context_iterates_keys_data_driven():
+    out = render_user_context({"memory": "MEM-VALUE", "currentDate": "Today's date is 2026-05-27."})
+    assert "<system-reminder>" in out and "</system-reminder>" in out
+    assert "# memory\nMEM-VALUE" in out
+    assert "# currentDate\nToday's date is 2026-05-27." in out
+    assert out.index("# memory") < out.index("# currentDate")
+    assert "IMPORTANT: this context may or may not be relevant" in out
