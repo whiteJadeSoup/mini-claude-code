@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 
-from langchain_core.messages import AIMessage, BaseMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
 from mini_cc.engine.messages import (
     AssistantMessage,
@@ -124,4 +124,32 @@ class MessageStore:
                 out.append(lc)
 
         flush()
-        return out
+        return _merge_consecutive_human(out)
+
+
+def _merge_consecutive_human(msgs: list[BaseMessage]) -> list[BaseMessage]:
+    """Merge runs of consecutive HumanMessages into one (content joined by
+    "\n\n"). DeepSeek-v4-pro rejects successive same-role turns; this is
+    the boundary-level fix (方案 C) so the store can keep synthetic context
+    and real input as separate, honest messages. Only HumanMessage merges —
+    ToolMessage (role=tool) and AIMessage pass through untouched, so a
+    tool_result is never folded into a user turn.
+
+    ASSUMPTION (serial input): today every consecutive-Human run is
+    {synthetic context}* + {one real user input}, because mini-cc processes
+    one user turn to completion before accepting the next. If concurrent /
+    queued input is added later, two *real* user turns could land in a row
+    and wrongly merge. EXTENSION POINT: when that feature lands, do the merge
+    at the store layer (mini-cc Message still carries is_synthetic) or pass a
+    'mergeable' predicate here, so only synthetic-adjacent runs collapse.
+
+    ASSUMPTION (str content): the join assumes HumanMessage.content is str
+    (true while UserMessage.content is str). Channel B-2 multimodal
+    attachments (list content) would break the '+' — out of scope now (L5)."""
+    out: list[BaseMessage] = []
+    for m in msgs:
+        if isinstance(m, HumanMessage) and out and isinstance(out[-1], HumanMessage):
+            out[-1] = HumanMessage(content=out[-1].content + "\n\n" + m.content)
+        else:
+            out.append(m)
+    return out

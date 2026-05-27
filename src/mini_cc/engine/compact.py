@@ -95,10 +95,11 @@ class ApiRound(BaseModel):
 def _group_by_api_round(messages: list[BaseMessage]) -> list[ApiRound]:
     """Split a LangChain message list into API rounds.
 
-    api_view() already merges consecutive AssistantMessages by turn_id,
-    so each AIMessage in the input represents exactly one assistant
-    round. That makes the boundary trivial: any AIMessage after a
-    non-empty `current` buffer flushes the buffer as a round.
+    api_view() already merges consecutive AssistantMessages by turn_id AND
+    consecutive HumanMessages (方案 C boundary merge), so each AIMessage in
+    the input represents exactly one assistant round, and the preamble holds
+    a single merged Human turn (never multiple). That makes the boundary
+    trivial: any AIMessage after a non-empty `current` buffer flushes it.
     """
     groups: list[ApiRound] = []
     current: list[BaseMessage] = []
