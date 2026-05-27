@@ -6,6 +6,9 @@ from mini_cc.prompts import build_system_prompt
 
 def test_system_prompt_declares_system_reminder_protocol():
     prompt = build_system_prompt(available_tools=set())
-    assert "<system-reminder>" in prompt
+    # Pin the declaration's opening phrase (incl. the tag name) + its two
+    # semantic clauses, so the test fails if the protocol wording drifts —
+    # not merely if the tag name appears somewhere in the prompt.
+    assert "Tool results and user messages may include <system-reminder>" in prompt
     assert "information from the system" in prompt
     assert "bear no direct relation" in prompt
