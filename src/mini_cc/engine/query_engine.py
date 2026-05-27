@@ -54,6 +54,8 @@ from mini_cc.engine.subscription import Consumer, Policy, Subscription
 from mini_cc.engine.transforms import Transform, identity
 from mini_cc.state import tasks, usage
 from mini_cc.skills import _skill_manager
+from mini_cc.memdir import get_auto_mem_path
+from mini_cc.memdir.injection import build_memory_context, render_user_context
 
 
 # ---------------------------------------------------------------------------
@@ -193,22 +195,28 @@ class QueryEngine:
         await self._dispatch(
             SystemPromptMessage(content=self._build_system_prompt(), source="boot")
         )
+        # Channel B-1: assemble the user-context dict (key-driven, extensible)
+        # and inject as ONE synthetic UserMessage. Kept in the messages region
+        # (not the system prompt) so the system-prompt prefix cache stays stable
+        # and the index can evolve without a cache bust.
+        from datetime import date
+        context: dict[str, str] = {}
+        if mem := build_memory_context(get_auto_mem_path()):
+            context["memory"] = mem
+        context["currentDate"] = f"Today's date is {date.today().isoformat()}."
+        rendered = render_user_context(context)
+        if rendered:
+            await self._dispatch(
+                UserMessage(content=rendered, is_synthetic=True, source="memory")
+            )
+
+        # task_state: inject the synthetic user message ONLY. No paired
+        # 'Acknowledged' assistant — 方案 C lets api_view merge consecutive
+        # users, so we no longer fabricate an assistant turn in the store.
         state = tasks._tasks.state_summary()
         if state:
-            # Kept out of the system prompt so DeepSeek's prefix cache stays
-            # stable turn-to-turn. Same rationale as the previous sync code.
             await self._dispatch(
                 UserMessage(content=state, is_synthetic=True, source="task_state")
-            )
-            await self._dispatch(
-                AssistantMessage(
-                    turn_id=f"local-{uuid.uuid4()}",
-                    model=self._model_name,
-                    content=TextBlock(
-                        text="Acknowledged. I have the current task plan."
-                    ),
-                    source="task_state",
-                )
             )
 
     # -- turn entries -------------------------------------------------------
