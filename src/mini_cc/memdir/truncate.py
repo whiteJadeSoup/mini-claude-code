@@ -52,9 +52,9 @@ def truncate_entrypoint(raw: str) -> str:
 
     return (
         truncated
-        # Single \n before the warning keeps body.count("\n") == MAX_ENTRYPOINT_LINES
-        # when the line cap fires; the test partitions on "> WARNING" and checks
-        # body.count("\n") <= MAX_ENTRYPOINT_LINES (a double \n would be 201, not 200).
-        + f"\n> WARNING: MEMORY.md is {reason}. Only part of it was loaded. "
+        # Blank line (\n\n) before the warning — mirrors CC memdir.ts:97 and keeps
+        # the warning a standalone block. Tests partition on the full "\n\n> WARNING"
+        # so the separator isn't miscounted as a content line.
+        + f"\n\n> WARNING: MEMORY.md is {reason}. Only part of it was loaded. "
         "Keep index entries to one line under ~200 chars; move detail into topic files."
     )
