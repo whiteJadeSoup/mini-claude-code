@@ -145,7 +145,12 @@ def _merge_consecutive_human(msgs: list[BaseMessage]) -> list[BaseMessage]:
 
     ASSUMPTION (str content): the join assumes HumanMessage.content is str
     (true while UserMessage.content is str). Channel B-2 multimodal
-    attachments (list content) would break the '+' — out of scope now (L5)."""
+    attachments (list content) would break the '+' — out of scope now (L5).
+
+    NOTE: reconstruction via HumanMessage(content=...) drops the merged
+    messages' .id and .additional_kwargs — safe while to_langchain_single
+    produces bare HumanMessage(content=str); revisit if message tracing via
+    .id is ever added."""
     out: list[BaseMessage] = []
     for m in msgs:
         if isinstance(m, HumanMessage) and out and isinstance(out[-1], HumanMessage):

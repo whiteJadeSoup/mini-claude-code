@@ -40,3 +40,27 @@ def test_single_and_empty():
     assert _merge_consecutive_human([]) == []
     one = [HumanMessage(content="solo")]
     assert _merge_consecutive_human(one)[0].content == "solo"
+
+
+def test_human_tool_human_is_not_merged():
+    # A ToolMessage between two humans breaks the merge run — the closest
+    # structural near-miss to an accidental merge (once tool calls are live).
+    out = _merge_consecutive_human([
+        HumanMessage(content="ctx"),
+        ToolMessage(content="result", tool_call_id="t1"),
+        HumanMessage(content="q"),
+    ])
+    assert [type(m).__name__ for m in out] == ["HumanMessage", "ToolMessage", "HumanMessage"]
+    assert out[0].content == "ctx"
+    assert out[2].content == "q"
+
+
+def test_merge_three_consecutive_humans():
+    # Run of 3 exercises the left-fold's second accumulation step.
+    out = _merge_consecutive_human([
+        HumanMessage(content="a"),
+        HumanMessage(content="b"),
+        HumanMessage(content="c"),
+    ])
+    assert len(out) == 1
+    assert out[0].content == "a\n\nb\n\nc"
