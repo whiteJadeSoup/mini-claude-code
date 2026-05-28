@@ -101,9 +101,11 @@ def test_truncate_under_caps_returns_trimmed():
 def test_truncate_over_line_cap_appends_warning():
     raw = "\n".join(f"- line{i}" for i in range(MAX_ENTRYPOINT_LINES + 50))
     out = truncate_entrypoint(raw)
-    body, _, warning = out.partition("> WARNING")
-    assert body.count("\n") <= MAX_ENTRYPOINT_LINES
-    assert warning  # warning present
+    # Partition on the full "\n\n> WARNING" separator so the blank line isn't
+    # counted as content; `content` is then exactly the truncated index.
+    content, sep, warning = out.partition("\n\n> WARNING")
+    assert sep  # warning block present, with its blank-line separator
+    assert content.count("\n") + 1 <= MAX_ENTRYPOINT_LINES  # N lines = N-1 newlines
     assert str(MAX_ENTRYPOINT_LINES) in warning
 
 
