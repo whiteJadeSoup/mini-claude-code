@@ -152,9 +152,21 @@ def _merge_consecutive_human(msgs: list[BaseMessage]) -> list[BaseMessage]:
     produces bare HumanMessage(content=str); revisit if message tracing via
     .id is ever added."""
     out: list[BaseMessage] = []
+    buf: list[str] = []  # content of the current consecutive-Human run
+
+    def flush() -> None:
+        # One join per run → O(k·L), not the O(k²·L) of repeatedly rebuilding
+        # the accumulating string with `+`. Mirrors api_view's own pending/flush
+        # shape for AssistantMessages, so both merges in this file read alike.
+        if buf:
+            out.append(HumanMessage(content="\n\n".join(buf)))
+            buf.clear()
+
     for m in msgs:
-        if isinstance(m, HumanMessage) and out and isinstance(out[-1], HumanMessage):
-            out[-1] = HumanMessage(content=out[-1].content + "\n\n" + m.content)
+        if isinstance(m, HumanMessage):
+            buf.append(m.content)
         else:
+            flush()
             out.append(m)
+    flush()
     return out
