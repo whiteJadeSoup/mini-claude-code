@@ -22,6 +22,7 @@ Why engine owns the store:
 """
 from __future__ import annotations
 
+import asyncio
 import sys
 from collections.abc import Callable
 from datetime import date, datetime, timezone
@@ -40,6 +41,7 @@ from mini_cc.engine.sandbox import Sandbox, allow_all
 from mini_cc.engine.messages import (
     AssistantMessage,
     Message,
+    RelevantMemoryMessage,
     SystemPromptMessage,
     StatusMessage,
     TextBlock,
@@ -52,9 +54,17 @@ from mini_cc.engine.store import MessageStore
 from mini_cc.engine.subscription import Consumer, Policy, Subscription
 from mini_cc.engine.transforms import Transform, identity
 from mini_cc.state import tasks, usage
+from mini_cc.state import file_read_state
 from mini_cc.skills import _skill_manager
 from mini_cc.memdir import get_auto_mem_path
 from mini_cc.memdir.injection import build_memory_context, render_user_context
+from mini_cc.memdir.prefetch import (
+    PrefetchHandle,
+    collect_recent_successful_tools,
+    collect_surfaced,
+    should_prefetch,
+    surface_relevant,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +125,7 @@ class QueryEngine:
             tools_by_name={t.name: t for t in sub_tools},
             model_name=model_name,
         )
+        self._pending: PrefetchHandle | None = None
 
     # -- subscribers --------------------------------------------------------
 
@@ -262,7 +273,7 @@ class QueryEngine:
         loop = self._sub_loop if is_sub_agent else self._main_loop
         last_text: str | None = None
         async for msg in loop.run(
-            get_messages=lambda: self._prepare_messages(parent_id=parent_id),
+            get_messages=lambda: self._turn_pre_call(parent_id),
             parent_id=parent_id,
             source=source,
             sandbox=sandbox,
@@ -287,7 +298,9 @@ class QueryEngine:
         If the first LLM call fails with a context-length error, one auto-
         compact is attempted and the turn retries from the compact summary.
         """
-        await self._dispatch(UserMessage(content=user_text, source="user"))
+        um = UserMessage(content=user_text, source="user")
+        await self._dispatch(um)
+        self._start_memory_prefetch(um)
         await self._dispatch(StatusMessage(event="turn_start", source="agent"))
         try:
             for attempt in range(2):
@@ -330,6 +343,7 @@ class QueryEngine:
                         continue
                     raise
         finally:
+            self._cancel_prefetch()
             await self._dispatch(StatusMessage(event="turn_end", source="agent"))
 
     async def run_sidechain(
@@ -436,6 +450,56 @@ class QueryEngine:
             )
         )
         return True
+
+    # -- memory prefetch (Layer 2) -----------------------------------------
+
+    def _start_memory_prefetch(self, user_msg: UserMessage) -> None:
+        """Fire the non-blocking relevant-memory prefetch for this turn.
+        Gated; sets self._pending = None when skipped. recent_tools /
+        already_surfaced / byte-budget all derived from the store."""
+        msgs = self.store.all()
+        surfaced_names, surfaced_bytes = collect_surfaced(msgs)
+        if not should_prefetch(user_msg.content, surfaced_bytes):
+            self._pending = None
+            return
+        recent = collect_recent_successful_tools(msgs, user_msg.id)
+        coro = surface_relevant(
+            user_msg.content, get_auto_mem_path(),
+            recent_tools=recent, already_surfaced=surfaced_names)
+        self._pending = PrefetchHandle(task=asyncio.create_task(coro))
+
+    async def _turn_pre_call(self, parent_id: str | None) -> list[BaseMessage]:
+        """get_messages hook: consume the prefetch if ready, then build view."""
+        await self._consume_prefetch_if_ready(parent_id)
+        return await self._prepare_messages(parent_id=parent_id)
+
+    async def _consume_prefetch_if_ready(self, parent_id: str | None) -> None:
+        """Non-blocking poll. If the prefetch settled (and we're on the main
+        branch), inject surviving memories as a RelevantMemoryMessage and mark
+        them seen in file_read_state (⑥ mark-after). Consume at most once."""
+        if parent_id is not None:                       # sidechain 不注入
+            return
+        h = self._pending
+        if h is None or h.consumed or not h.task.done():
+            return
+        try:
+            surfaced = h.task.result()
+        except Exception:                               # 失败/取消 → best-effort
+            h.consumed = True
+            return
+        fresh = [m for m in surfaced if file_read_state._state.get(m.path) is None]  # ⑥ filter
+        if fresh:
+            await self._dispatch(RelevantMemoryMessage(memories=fresh, source="memory"))
+            for m in fresh:                             # ⑥ mark-after（先 filter 后 record）
+                file_read_state._state.record(
+                    m.path, m.content, m.mtime_ms, offset=1, limit=m.line_count)
+        h.consumed = True
+
+    def _cancel_prefetch(self) -> None:
+        """Symbol.dispose 的 Python 替代：回合退出时取消未完成的 prefetch。"""
+        if self._pending is not None and not self._pending.task.done():
+            self._pending.task.cancel()
+        self._pending = None
 
     # -- pre-call hook ------------------------------------------------------
 

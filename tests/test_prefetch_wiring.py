@@ -1,0 +1,107 @@
+"""Prefetch wiring：kick-off / consume / cancel 三处 seam（不打 API）。"""
+import asyncio
+from unittest.mock import MagicMock
+
+import pytest
+
+from mini_cc.engine import query_engine as qe_mod
+from mini_cc.engine.messages import RelevantMemoryMessage, SurfacedMemory, UserMessage
+from mini_cc.engine.query_engine import QueryEngine
+
+
+def _engine() -> QueryEngine:
+    # QueryEngine.__init__ 真实签名：llm_base, main_tools, sub_tools, model_name, system_prompt_builder
+    # llm_base.bind_tools() 在 __init__ 里被调用，需要 MagicMock 支持
+    return QueryEngine(llm_base=MagicMock(), main_tools=[], sub_tools=[],
+                       model_name="test", system_prompt_builder=lambda: "SYS")
+
+
+def _sm(filename="user_role.md"):
+    return SurfacedMemory(filename=filename, path=f"/abs/{filename}",
+                          content="likes uv", mtime_ms=1, line_count=1,
+                          header=f"Memory: {filename}:")
+
+
+def _patch_memdir(monkeypatch, tmp_path):
+    monkeypatch.setattr(qe_mod, "get_auto_mem_path", lambda: tmp_path)
+
+
+async def test_start_skips_single_word(monkeypatch, tmp_path):
+    _patch_memdir(monkeypatch, tmp_path)
+    eng = _engine()
+    eng._start_memory_prefetch(UserMessage(content="hi", source="user"))
+    assert eng._pending is None
+
+
+async def test_consume_injects_and_records(monkeypatch, tmp_path):
+    _patch_memdir(monkeypatch, tmp_path)
+    async def _fake_surface(*a, **k):
+        return [_sm()]
+    monkeypatch.setattr(qe_mod, "surface_relevant", _fake_surface)
+    monkeypatch.setattr(qe_mod.file_read_state._state, "get", lambda p: None)
+    recorded = []
+    monkeypatch.setattr(qe_mod.file_read_state._state, "record",
+                        lambda path, *a, **k: recorded.append(path))
+
+    eng = _engine()
+    eng._start_memory_prefetch(UserMessage(content="recommend a pkg manager", source="user"))
+    await eng._pending.task
+    await eng._consume_prefetch_if_ready(parent_id=None)
+
+    injected = [m for m in eng.store._messages if isinstance(m, RelevantMemoryMessage)]
+    assert len(injected) == 1 and eng._pending.consumed is True
+    assert "/abs/user_role.md" in recorded
+
+
+async def test_consume_noop_when_not_ready(monkeypatch, tmp_path):
+    _patch_memdir(monkeypatch, tmp_path)
+    async def _slow(*a, **k):
+        await asyncio.sleep(10)
+        return []
+    monkeypatch.setattr(qe_mod, "surface_relevant", _slow)
+    eng = _engine()
+    eng._start_memory_prefetch(UserMessage(content="a real query", source="user"))
+    await eng._consume_prefetch_if_ready(parent_id=None)
+    assert [m for m in eng.store._messages if isinstance(m, RelevantMemoryMessage)] == []
+    assert eng._pending.consumed is False
+    eng._cancel_prefetch()
+
+
+async def test_consume_skips_sidechain(monkeypatch, tmp_path):
+    _patch_memdir(monkeypatch, tmp_path)
+    async def _fake_surface(*a, **k):
+        return [_sm()]
+    monkeypatch.setattr(qe_mod, "surface_relevant", _fake_surface)
+    eng = _engine()
+    eng._start_memory_prefetch(UserMessage(content="a real query", source="user"))
+    await eng._pending.task
+    await eng._consume_prefetch_if_ready(parent_id="sidechain-id")
+    assert [m for m in eng.store._messages if isinstance(m, RelevantMemoryMessage)] == []
+
+
+async def test_consume_filters_already_read(monkeypatch, tmp_path):
+    _patch_memdir(monkeypatch, tmp_path)
+    async def _fake_surface(*a, **k):
+        return [_sm()]
+    monkeypatch.setattr(qe_mod, "surface_relevant", _fake_surface)
+    monkeypatch.setattr(qe_mod.file_read_state._state, "get", lambda p: object())
+    eng = _engine()
+    eng._start_memory_prefetch(UserMessage(content="a real query", source="user"))
+    await eng._pending.task
+    await eng._consume_prefetch_if_ready(parent_id=None)
+    assert [m for m in eng.store._messages if isinstance(m, RelevantMemoryMessage)] == []
+
+
+async def test_cancel_cancels_running_task(monkeypatch, tmp_path):
+    _patch_memdir(monkeypatch, tmp_path)
+    async def _slow(*a, **k):
+        await asyncio.sleep(10)
+        return []
+    monkeypatch.setattr(qe_mod, "surface_relevant", _slow)
+    eng = _engine()
+    eng._start_memory_prefetch(UserMessage(content="a real query", source="user"))
+    task = eng._pending.task
+    eng._cancel_prefetch()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert eng._pending is None
