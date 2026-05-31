@@ -37,6 +37,7 @@ from mini_cc.engine.messages import (
     AssistantMessage,
     CompactBoundaryMessage,
     Message,
+    RelevantMemoryMessage,
     StatusMessage,
     SystemPromptMessage,
     TextBlock,
@@ -98,6 +99,14 @@ def _shorten_cwd(path: str) -> str:
     if p.startswith(home.replace("\\", "/")):
         return "~" + p[len(home):]
     return p
+
+
+def _recalled_markup(filenames: list[str]) -> str:
+    """One-line feedback for auto-surfaced memories, mirroring CC's collapsed
+    "recalled N memories". Pure (no widget) so it is unit-testable."""
+    n = len(filenames)
+    noun = "memory" if n == 1 else "memories"
+    return f"[dim]※ recalled {n} {noun}: {', '.join(filenames)}[/dim]"
 
 
 # ---------------------------------------------------------------------------
@@ -578,6 +587,13 @@ class MiniCCApp(App):
             left = pad // 2
             right = pad - left
             chat_log.append_markup(f"[dim]{'─' * left}{core}{'─' * right}[/dim]")
+
+        elif isinstance(payload, RelevantMemoryMessage):
+            # Auto-surfaced memories were injected into the conversation; give the
+            # user a one-line "recalled N" trace (CC parity) instead of silence.
+            chat_log.append_markup(
+                _recalled_markup([m.filename for m in payload.memories])
+            )
 
     def on_tool_flushed(self, msg: ToolFlushed) -> None:
         self.query_one(ChatLog).append_markup(msg.markup)
