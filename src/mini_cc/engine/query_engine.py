@@ -489,7 +489,17 @@ class QueryEngine:
             # 发生（此时 consume 已结束），正常路径不会在这里见到已取消的 task。
             h.consumed = True
             return
-        fresh = [m for m in surfaced if file_read_state._state.get(m.path) is None]  # ⑥ filter
+        # ⑥ filter: surface a memory unless the model already has its CURRENT
+        # content. "Already has" = an entry exists AND is still consistent with
+        # what we just read (mtime match, or content match on mtime jitter). A
+        # memory changed since last surfaced (auto-extract rewrite / user edit)
+        # is stale → re-surface so the fresh content re-enters context.
+        fresh = []
+        for m in surfaced:
+            entry = file_read_state._state.get(m.path)
+            if entry is None or not file_read_state._state.is_consistent(
+                    entry, m.mtime_ms, m.content):
+                fresh.append(m)
         if fresh:
             await self._dispatch(RelevantMemoryMessage(memories=fresh, source="memory"))
             for m in fresh:                             # ⑥ mark-after（先 filter 后 record）

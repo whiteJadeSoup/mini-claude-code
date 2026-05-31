@@ -79,17 +79,39 @@ async def test_consume_skips_sidechain(monkeypatch, tmp_path):
     assert [m for m in eng.store._messages if isinstance(m, RelevantMemoryMessage)] == []
 
 
-async def test_consume_filters_already_read(monkeypatch, tmp_path):
+async def test_consume_skips_already_read_unchanged(monkeypatch, tmp_path):
+    # 读过且没变（mtime 一致 → is_consistent）→ 跳过，不重复注入。
+    from mini_cc.state.file_read_state import FileReadState
     _patch_memdir(monkeypatch, tmp_path)
     async def _fake_surface(*a, **k):
-        return [_sm()]
+        return [_sm()]                                   # mtime_ms=1, content="likes uv"
     monkeypatch.setattr(qe_mod, "surface_relevant", _fake_surface)
-    monkeypatch.setattr(qe_mod.file_read_state._state, "get", lambda p: object())
+    seen = FileReadState()
+    seen.record("/abs/user_role.md", "likes uv", 1, offset=1, limit=1)  # 同 mtime+content
+    monkeypatch.setattr(qe_mod.file_read_state, "_state", seen)
     eng = _engine()
     eng._start_memory_prefetch(UserMessage(content="a real query", source="user"))
     await eng._pending.task
     await eng._consume_prefetch_if_ready(parent_id=None)
     assert [m for m in eng.store._messages if isinstance(m, RelevantMemoryMessage)] == []
+
+
+async def test_consume_resurfaces_stale(monkeypatch, tmp_path):
+    # 读过但文件已变（mtime+content 不同 → is_consistent False）→ 重新召回。
+    from mini_cc.state.file_read_state import FileReadState
+    _patch_memdir(monkeypatch, tmp_path)
+    async def _fake_surface(*a, **k):
+        return [_sm()]                                   # 当前：mtime_ms=1, content="likes uv"
+    monkeypatch.setattr(qe_mod, "surface_relevant", _fake_surface)
+    stale = FileReadState()
+    stale.record("/abs/user_role.md", "OLD likes pip", 999, offset=1, limit=1)  # 旧 mtime+content
+    monkeypatch.setattr(qe_mod.file_read_state, "_state", stale)
+    eng = _engine()
+    eng._start_memory_prefetch(UserMessage(content="a real query", source="user"))
+    await eng._pending.task
+    await eng._consume_prefetch_if_ready(parent_id=None)
+    injected = [m for m in eng.store._messages if isinstance(m, RelevantMemoryMessage)]
+    assert len(injected) == 1                            # 内容变了 → 重新召回
 
 
 async def test_consume_empty_surface_marks_consumed(monkeypatch, tmp_path):
