@@ -86,6 +86,16 @@ def test_recent_tools_stops_at_previous_user_turn():
     assert collect_recent_successful_tools(msgs, current_user_id="u2") == ("file_edit",)
 
 
+def test_recent_tools_reverse_chronological_order():
+    # 多工具成功时顺序必须确定（reverse-chronological，对齐 CC）：grep 在前、
+    # file_edit 在后 → 倒序先遇到 file_edit → 结果 most-recent-first。
+    msgs = [UserMessage(id="u1", content="p", source="user"),
+            _asst_tool("c1", "grep"), _result("c1", error=False),
+            _asst_tool("c2", "file_edit"), _result("c2", error=False),
+            UserMessage(id="u2", content="c", source="user")]
+    assert collect_recent_successful_tools(msgs, current_user_id="u2") == ("file_edit", "grep")
+
+
 def test_read_and_truncate_under_cap(tmp_path):
     f = tmp_path / "m.md"
     f.write_text("line1\nline2\n", encoding="utf-8")

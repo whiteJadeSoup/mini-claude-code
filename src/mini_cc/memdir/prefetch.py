@@ -67,10 +67,21 @@ def collect_recent_successful_tools(
             use_to_name[m.content.call_id] = m.content.name
         elif isinstance(m, ToolResultMessage):
             errored[m.tool_call_id] = bool(m.output is not None and m.output.is_error)
-    # 成功集合：有明确 False 的；失败集合：有明确 True 的
-    succeeded = {n for cid, n in use_to_name.items() if errored.get(cid) is False}
-    failed = {n for cid, n in use_to_name.items() if errored.get(cid) is True}
-    return tuple(succeeded - failed)
+    # 保留 use_to_name 的插入顺序（倒序扫描 = reverse-chronological），结果确定。
+    # `set - set` 会按哈希打乱、跨进程不稳定（PYTHONHASHSEED）→ recent_tools 进
+    # selector prompt 的字节漂移、破坏 prompt cache。镜像 CC attachments.ts:2502
+    # `[...succeeded].filter(t => !failed.has(t))`：dict 当有序集，filter 掉曾报错的。
+    failed: set[str] = set()
+    succeeded: dict[str, None] = {}
+    for cid, name in use_to_name.items():
+        e = errored.get(cid)
+        if e is None:        # 该 tool_use 没有配对的 result → 跳过（同 CC undefined）
+            continue
+        if e:
+            failed.add(name)
+        else:
+            succeeded.setdefault(name, None)
+    return tuple(n for n in succeeded if n not in failed)
 
 
 def read_and_truncate(h: MemoryHeader) -> SurfacedMemory | None:
