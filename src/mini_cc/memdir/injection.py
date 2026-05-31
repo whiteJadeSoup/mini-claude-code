@@ -12,8 +12,12 @@ Adding gitStatus/userEmail later = one more dict key, zero changes here.
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from mini_cc.memdir.truncate import truncate_entrypoint
+
+if TYPE_CHECKING:
+    from mini_cc.engine.messages import SurfacedMemory
 
 # Fixed description string, like CC's per-type `description` (claudemd.ts:1176).
 # It is content-about-content, not data — so it lives here, not in the dict.
@@ -77,15 +81,16 @@ def render_user_context(context: dict[str, str]) -> str:
     )
 
 
-def render_relevant_memories(memories) -> str:
+def render_relevant_memories(memories: list[SurfacedMemory]) -> str:
     """Render auto-surfaced memories: one <system-reminder> block PER memory.
 
     Mirrors CC (messages.ts:3708 — wrapMessagesInSystemReminder maps over each
     memory, so 1 memory = 1 block). Each block = the frozen freshness header
     (m.header, computed once at surfacing time) + the file body. Embedded
     system-reminder tags in the body are neutralized so they can't prematurely
-    close the block. `memories` is a list[SurfacedMemory] (annotated loosely to
-    avoid a runtime import cycle — only .header/.content are read)."""
+    close the block. The SurfacedMemory annotation is import-cycle-safe: under
+    `from __future__ import annotations` it is a string, and its import lives in
+    a TYPE_CHECKING guard, so messages.py is never imported here at runtime."""
     blocks = [
         "<system-reminder>\n"
         f"{m.header}\n\n"
