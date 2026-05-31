@@ -92,6 +92,20 @@ async def test_consume_filters_already_read(monkeypatch, tmp_path):
     assert [m for m in eng.store._messages if isinstance(m, RelevantMemoryMessage)] == []
 
 
+async def test_consume_empty_surface_marks_consumed(monkeypatch, tmp_path):
+    # gate 通过但 surface 返回空 → 不注入，但仍标记 consumed（下轮不再重 poll）。
+    _patch_memdir(monkeypatch, tmp_path)
+    async def _empty(*a, **k):
+        return []
+    monkeypatch.setattr(qe_mod, "surface_relevant", _empty)
+    eng = _engine()
+    eng._start_memory_prefetch(UserMessage(content="a real query", source="user"))
+    await eng._pending.task
+    await eng._consume_prefetch_if_ready(parent_id=None)
+    assert eng._pending.consumed is True
+    assert [m for m in eng.store._messages if isinstance(m, RelevantMemoryMessage)] == []
+
+
 async def test_cancel_cancels_running_task(monkeypatch, tmp_path):
     _patch_memdir(monkeypatch, tmp_path)
     async def _slow(*a, **k):

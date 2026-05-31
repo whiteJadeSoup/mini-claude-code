@@ -484,7 +484,9 @@ class QueryEngine:
             return
         try:
             surfaced = h.task.result()
-        except Exception:                               # 失败/取消 → best-effort
+        except Exception:        # surface_relevant best-effort：selector/IO 异常 → 跳过。
+            # CancelledError 是 BaseException、不在此捕获；且 cancel 只在回合 finally
+            # 发生（此时 consume 已结束），正常路径不会在这里见到已取消的 task。
             h.consumed = True
             return
         fresh = [m for m in surfaced if file_read_state._state.get(m.path) is None]  # ⑥ filter
