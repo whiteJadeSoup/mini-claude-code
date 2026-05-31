@@ -92,6 +92,26 @@ class ToolResultMessage(Message):
         return v
 
 
+class SurfacedMemory(BaseModel):
+    """One auto-surfaced memory file in a RelevantMemoryMessage.
+
+    Carries BOTH key forms on purpose: `filename` (relative) is what the
+    selector + already_surfaced dedup match on; `path` (absolute) is what
+    file_read_state keys on. See prefetch design §"SurfacedMemory 双 key"."""
+    filename: str
+    path: str
+    content: str       # already truncated by read_and_truncate (⑤)
+    mtime_ms: int
+    line_count: int    # surfaced line count → file_read_state record's `limit`
+    header: str        # frozen freshness header (memory_header), computed once
+                       # at surfacing time → cache-stable rendered bytes
+
+
+class RelevantMemoryMessage(Message):
+    type: Literal["relevant_memory"] = "relevant_memory"
+    memories: list[SurfacedMemory]
+
+
 # --- Layer 2: UI Messages ---
 
 class CompactBoundaryMessage(Message):
@@ -116,7 +136,7 @@ class StatusMessage(Message):
 
 # --- Layer classification ---
 
-LAYER_1_TYPES = (SystemPromptMessage, UserMessage, AssistantMessage, ToolResultMessage)
+LAYER_1_TYPES = (SystemPromptMessage, UserMessage, AssistantMessage, ToolResultMessage, RelevantMemoryMessage)
 LAYER_2_TYPES = (CompactBoundaryMessage, StatusMessage)
 
 
@@ -136,6 +156,11 @@ def to_langchain_single(msg: Message) -> BaseMessage | None:
         return None
     if isinstance(msg, ToolResultMessage):
         return ToolMessage(content=msg.content, tool_call_id=msg.tool_call_id)
+    if isinstance(msg, RelevantMemoryMessage):
+        # Lazy import avoids a load-time cycle (injection imports nothing from
+        # messages at runtime; this mirrors ToolResultMessage's output_from_dict).
+        from mini_cc.memdir.injection import render_relevant_memories
+        return HumanMessage(content=render_relevant_memories(msg.memories))
     return None
 
 

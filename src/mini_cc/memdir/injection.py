@@ -75,3 +75,22 @@ def render_user_context(context: dict[str, str]) -> str:
         "not respond to this context unless it is highly relevant to your task.\n"
         "</system-reminder>\n"
     )
+
+
+def render_relevant_memories(memories) -> str:
+    """Render auto-surfaced memories: one <system-reminder> block PER memory.
+
+    Mirrors CC (messages.ts:3708 — wrapMessagesInSystemReminder maps over each
+    memory, so 1 memory = 1 block). Each block = the frozen freshness header
+    (m.header, computed once at surfacing time) + the file body. Embedded
+    system-reminder tags in the body are neutralized so they can't prematurely
+    close the block. `memories` is a list[SurfacedMemory] (annotated loosely to
+    avoid a runtime import cycle — only .header/.content are read)."""
+    blocks = [
+        "<system-reminder>\n"
+        f"{m.header}\n\n"
+        f"{_neutralize_reminder_tags(m.content)}\n"
+        "</system-reminder>"
+        for m in memories
+    ]
+    return "\n".join(blocks) + "\n"
