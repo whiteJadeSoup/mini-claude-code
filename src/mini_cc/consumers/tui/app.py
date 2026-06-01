@@ -33,17 +33,7 @@ from textual.message import Message as TxtMessage
 from textual.widgets import Input, Markdown, Static
 
 from mini_cc.engine.predicates import is_persisted_layer
-from mini_cc.engine.messages import (
-    AssistantMessage,
-    CompactBoundaryMessage,
-    Message,
-    RelevantMemoryMessage,
-    StatusMessage,
-    SystemPromptMessage,
-    TextBlock,
-    ToolResultMessage,
-    ToolUseBlock,
-)
+from mini_cc.engine.messages import Message
 from mini_cc.tools.base import ToolOutput, get_tool
 from mini_cc.state import usage
 
@@ -99,14 +89,6 @@ def _shorten_cwd(path: str) -> str:
     if p.startswith(home.replace("\\", "/")):
         return "~" + p[len(home):]
     return p
-
-
-def _recalled_markup(filenames: list[str]) -> str:
-    """One-line feedback for auto-surfaced memories, mirroring CC's collapsed
-    "recalled N memories". Pure (no widget) so it is unit-testable."""
-    n = len(filenames)
-    noun = "memory" if n == 1 else "memories"
-    return f"[dim]※ recalled {n} {noun}: {', '.join(filenames)}[/dim]"
 
 
 # ---------------------------------------------------------------------------
@@ -533,67 +515,35 @@ class MiniCCApp(App):
 
     # -- engine message routing ---------------------------------------------
 
+    # Widget accessors — renderers reach widgets through these, so renderers.py
+    # never imports widget classes (keeps the renderer module decoupled).
+    @property
+    def chat_log(self) -> ChatLog:
+        return self.query_one(ChatLog)
+
+    @property
+    def tool_status(self) -> ToolStatus:
+        return self.query_one(ToolStatus)
+
+    @property
+    def turn_footer(self) -> TurnFooter:
+        return self.query_one(TurnFooter)
+
+    @property
+    def status_bar(self) -> StatusBar:
+        return self.query_one(StatusBar)
+
+    @property
+    def input_bar(self) -> Input:
+        return self.query_one(Input)
+
     def on_engine_msg(self, msg: EngineMsg) -> None:
-        payload = msg.payload
-        chat_log = self.query_one(ChatLog)
-        tool_status = self.query_one(ToolStatus)
-        turn_footer = self.query_one(TurnFooter)
-
-        if isinstance(payload, StatusMessage):
-            if payload.event == "turn_start":
-                tool_status.start_turn()
-                turn_footer.start_turn()
-                chat_log.scroll_end(animate=False)
-            elif payload.event == "turn_end":
-                tool_status.end_turn()
-                summary = turn_footer.stop_turn()
-                if summary:
-                    chat_log.append_markup(summary, classes="turn-summary")
-                inp = self.query_one(Input)
-                inp.disabled = False
-                inp.placeholder = "Message…"
-                self.set_focus(inp)
-                self.query_one(StatusBar).refresh_status()
-            elif payload.event == "skills_changed":
-                data = payload.data or {}
-                for name in data.get("added") or []:
-                    chat_log.append_markup(f"[green dim]＋ skill: /{name}[/green dim]")
-                for name in data.get("removed") or []:
-                    chat_log.append_markup(f"[red dim]－ skill: /{name}[/red dim]")
-
-        elif isinstance(payload, AssistantMessage):
-            if isinstance(payload.content, TextBlock) and payload.content.text.strip():
-                chat_log.append_assistant(payload.content.text)
-            elif isinstance(payload.content, ToolUseBlock):
-                block = payload.content
-                tool_status.add_tool(
-                    call_id=block.call_id,
-                    name=block.name,
-                    args=block.args or {},
-                    prefix="  " if payload.parent_id else "",
-                    asst_id=payload.id,
-                    parent_id=payload.parent_id,
-                )
-            self.query_one(StatusBar).refresh_status()
-
-        elif isinstance(payload, ToolResultMessage):
-            tool_status.complete_tool(payload.tool_call_id, output=payload.output)
-
-        elif isinstance(payload, CompactBoundaryMessage):
-            label = "auto-compact" if payload.auto else "compact"
-            core = f" ※ {label} · removed {payload.pre_count} msgs "
-            width = max(20, (chat_log.size.width or 80) - 4)
-            pad = max(0, width - len(core))
-            left = pad // 2
-            right = pad - left
-            chat_log.append_markup(f"[dim]{'─' * left}{core}{'─' * right}[/dim]")
-
-        elif isinstance(payload, RelevantMemoryMessage):
-            # Auto-surfaced memories were injected into the conversation; give the
-            # user a one-line "recalled N" trace (CC parity) instead of silence.
-            chat_log.append_markup(
-                _recalled_markup([m.filename for m in payload.memories])
-            )
+        # Declarative dispatch via renderers.py: adding a message type = add a
+        # @renders renderer there; this method never changes (open for
+        # extension, closed for modification). Lazy import breaks the
+        # app↔renderers cycle (renderers type-references MiniCCApp).
+        from mini_cc.consumers.tui.renderers import dispatch
+        dispatch(self, msg.payload)
 
     def on_tool_flushed(self, msg: ToolFlushed) -> None:
         self.query_one(ChatLog).append_markup(msg.markup)
