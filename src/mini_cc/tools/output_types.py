@@ -95,25 +95,26 @@ class FileReadOutput(ToolOutput):
     returned_lines: int = 0
     truncated_by_limit: bool = False
     unchanged: bool = False          # G6 dedup hit (path/offset/limit/mtime all unchanged)
+    staleness_note: str = ""         # frozen <system-reminder> freshness note for
+                                     # memory files; "" for non-memory reads
 
     def to_api_str(self) -> str:
-        # Plain text only — no <system-reminder> tag (CC uses it because its
-        # system prompt teaches the LLM how to read the tag; mini-cc's prompts.py
-        # has no such convention, so wrapping in the tag would invent a protocol.)
-        #
-        # The `unchanged` flag is now a UI-only annotation — the API path
-        # always returns content. CC's `FILE_UNCHANGED_STUB` ("refer to the
-        # earlier tool_result") relies on that earlier result still being
-        # in context, but mini-cc's engine clears old tool_results on every
-        # turn (see _clear_old_tool_results); the stub would point at
-        # `[Cleared]`. Re-emitting content keeps the dedup tool-IO-cheap
-        # (no disk re-read) without breaking the LLM's view.
+        # Memory files carry a frozen freshness <system-reminder> prefix
+        # (staleness_note, set by file_read._run). B-0 established the
+        # system-reminder convention in the main prompt, so the tag is
+        # understood. Non-memory reads have staleness_note == "" → plain
+        # content, behavior unchanged. `unchanged` stays a UI-only annotation —
+        # the API path always returns content (the engine clears old
+        # tool_results every turn, so a "see earlier result" stub would point
+        # at `[Cleared]`).
         if self.total_lines == 0:
-            return f"File is empty: {self.path}"
-        if self.returned_lines == 0:
-            return (f"File has {self.total_lines} lines; "
+            body = f"File is empty: {self.path}"
+        elif self.returned_lines == 0:
+            body = (f"File has {self.total_lines} lines; "
                     f"offset {self.start_line} is beyond the end.")
-        return self.content
+        else:
+            body = self.content
+        return self.staleness_note + body
 
 
 class GrepOutput(ToolOutput):
