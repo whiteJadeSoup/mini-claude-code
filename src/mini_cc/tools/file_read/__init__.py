@@ -8,6 +8,7 @@ import os
 
 from mini_cc import config
 from mini_cc.state import file_read_state
+from mini_cc.memdir.age import memory_freshness_note
 from mini_cc.tools.base import (
     FileReadOutput,
     MiniTool,
@@ -21,6 +22,21 @@ from .render import render_complete, render_received
 
 # Limits (G1 + G5)
 DEFAULT_LIMIT = 2000
+
+
+def _frozen_memory_staleness(resolved: str, mtime_ms: int) -> str:
+    """Frozen freshness note for a memory-file read. Computed ONCE here (not in
+    to_api_str), so the tool-result bytes stay stable across api_view rebuilds —
+    age derives from the clock and would otherwise drift on day boundaries and
+    bust the prompt cache (same reason SurfacedMemory.header is frozen). Returns
+    '' for non-memory paths or memories <=1 day old. Mirrors safe_path's memdir
+    comparison."""
+    from mini_cc.memdir import get_auto_mem_path
+    memdir = os.path.normcase(str(get_auto_mem_path()))
+    rp = os.path.normcase(resolved)
+    if rp == memdir or rp.startswith(memdir + os.sep):
+        return memory_freshness_note(mtime_ms)
+    return ""
 MAX_LINE_CHARS = 2000        # single-line truncation
 MAX_FILE_BYTES = 256 * 1024  # G5 layer 1: stat-time pre-filter
 MAX_FILE_CHARS = 100_000     # G5 layer 2: char-count proxy for ~25k tokens
@@ -82,6 +98,7 @@ class FileReadTool(MiniTool):
         # self-contained: the LLM always has the file in front of it,
         # regardless of how aggressive the clear hook is.
         mtime_ms = int(st.st_mtime * 1000)
+        staleness = _frozen_memory_staleness(p, mtime_ms)
         entry = file_read_state._state.get(p)
         if (
             entry is not None
@@ -113,6 +130,7 @@ class FileReadTool(MiniTool):
                 returned_lines=len(sliced),
                 truncated_by_limit=(end < total),
                 unchanged=True,
+                staleness_note=staleness,
             )
 
         # 5. Read with UTF-8 + CRLF normalize (OQ1) — non-UTF-8 → error.
@@ -169,6 +187,7 @@ class FileReadTool(MiniTool):
             start_line=offset,
             returned_lines=len(sliced),
             truncated_by_limit=(end < total),
+            staleness_note=staleness,
         )
 
     def render_received(self, args: dict) -> str:
