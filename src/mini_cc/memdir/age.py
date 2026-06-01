@@ -49,3 +49,11 @@ def memory_header(filename: str, mtime_ms: int) -> str:
     if staleness:
         return f"{staleness}\n\nMemory: {filename}:"
     return f"Memory (saved {memory_age(mtime_ms)}): {filename}:"
+
+
+def memory_freshness_note(mtime_ms: int) -> str:
+    """Self-wrapped staleness note for callers that don't add their own
+    <system-reminder> (e.g. file_read output). '' for memories <=1 day old.
+    Mirrors CC memoryAge.ts:49 (memoryFreshnessNote)."""
+    text = memory_freshness_text(mtime_ms)
+    return f"<system-reminder>{text}</system-reminder>\n" if text else ""

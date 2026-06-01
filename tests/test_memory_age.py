@@ -2,7 +2,8 @@
 import time
 
 from mini_cc.memdir.age import (
-    memory_age, memory_age_days, memory_freshness_text, memory_header,
+    memory_age, memory_age_days, memory_freshness_note, memory_freshness_text,
+    memory_header,
 )
 
 _DAY = 86_400_000
@@ -40,3 +41,16 @@ def test_header_stale_has_caveat_and_name():
 
 def test_age_days_never_negative():
     assert memory_age_days(int(time.time() * 1000) + 10 * _DAY) == 0
+
+
+def test_memory_freshness_note_wraps_when_stale():
+    note = memory_freshness_note(_ago(47))
+    assert note.startswith("<system-reminder>")
+    assert note.rstrip().endswith("</system-reminder>")
+    assert "47 days old" in note and "Verify against current code" in note
+
+
+def test_memory_freshness_note_empty_when_fresh():
+    # <=1 day → no note（对新 memory 警告是噪声）
+    assert memory_freshness_note(_ago(0)) == ""
+    assert memory_freshness_note(_ago(1)) == ""
