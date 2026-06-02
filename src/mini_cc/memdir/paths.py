@@ -239,3 +239,23 @@ def get_auto_mem_daily_log_path(date: datetime | None = None) -> Path:
         / f"{date.month:02d}"
         / f"{date.year:04d}-{date.month:02d}-{date.day:02d}.md"
     )
+
+
+def is_memory_path(resolved: str) -> bool:
+    """Whether an already-resolved absolute path lives inside this session's
+    memdir (the memdir directory itself counts).
+
+    `resolved` MUST already be resolved (e.g. via os.path.realpath or
+    config.safe_path) — this is a pure comparison; it does not resolve or
+    expand. Kept config-free to avoid a config<->memdir import cycle: the
+    caller owns the resolve step.
+
+    The lazy `from mini_cc.memdir import get_auto_mem_path` routes through the
+    package attribute (not the module-local name) so tests that monkeypatch
+    `mini_cc.memdir.get_auto_mem_path` take effect here too — matching how
+    config.safe_path and file_read already resolve it.
+    """
+    from mini_cc.memdir import get_auto_mem_path
+    memdir = os.path.normcase(str(get_auto_mem_path()))
+    rp = os.path.normcase(resolved)
+    return rp == memdir or rp.startswith(memdir + os.sep)

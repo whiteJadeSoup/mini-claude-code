@@ -49,11 +49,10 @@ def safe_path(path: str) -> str:
     if resolved_norm == cwd_norm or resolved_norm.startswith(cwd_norm + os.sep):
         return resolved
 
-    # Lazy: avoid import-time git rev-parse subprocess. get_auto_mem_path is
-    # @cache'd so this is one subprocess per process; ~0ms after the first call.
-    from mini_cc.memdir import get_auto_mem_path
-    memdir_norm = os.path.normcase(str(get_auto_mem_path()))
-    if resolved_norm == memdir_norm or resolved_norm.startswith(memdir_norm + os.sep):
+    # Lazy: avoid import-time git rev-parse subprocess. is_memory_path does the
+    # normcase memdir comparison (get_auto_mem_path is @cache'd: ~0ms after first).
+    from mini_cc.memdir import is_memory_path
+    if is_memory_path(resolved):
         return resolved
 
     raise ValueError(f"Path {path} is outside working directory or memdir")

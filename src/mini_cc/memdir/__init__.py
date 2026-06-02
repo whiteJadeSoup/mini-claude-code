@@ -18,6 +18,7 @@ from mini_cc.memdir.paths import (
     get_auto_mem_daily_log_path,
     get_auto_mem_entrypoint,
     get_auto_mem_path,
+    is_memory_path,
     validate_memory_path,
 )
 from mini_cc.memdir.scan import (
@@ -41,6 +42,7 @@ __all__ = [
     "get_auto_mem_daily_log_path",
     "get_auto_mem_entrypoint",
     "get_auto_mem_path",
+    "is_memory_path",
     "parse_memory_type",
     "scan_memory_files",
     "validate_memory_path",
