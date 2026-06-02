@@ -36,6 +36,7 @@ from mini_cc.engine.predicates import is_persisted_layer
 from mini_cc.engine.messages import Message
 from mini_cc.tools.base import ToolOutput, get_tool
 from mini_cc.state import usage
+from mini_cc.consumers.tui.memory_ops import MemoryRun
 
 # Braille spinner for TurnFooter
 _FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
@@ -192,6 +193,7 @@ class ToolStatus(Static):
         self._tools: dict[str, dict] = {}
         self._tool_order: list[str] = []
         self._groups: dict[str, dict] = {}
+        self._mem_run = MemoryRun()
         self._frame = 0
 
     def on_mount(self) -> None:
@@ -201,13 +203,16 @@ class ToolStatus(Static):
         self._tools.clear()
         self._tool_order.clear()
         self._groups.clear()
+        self._mem_run = MemoryRun()
         self._frame = 0
         self.add_class("active")
 
     def end_turn(self) -> None:
+        self._flush_mem_run()
         self._tools.clear()
         self._tool_order.clear()
         self._groups.clear()
+        self._mem_run = MemoryRun()
         self.update("")
         self.remove_class("active")
 
@@ -220,6 +225,16 @@ class ToolStatus(Static):
         asst_id: str,
         parent_id: str | None,
     ) -> None:
+        # Top-level agent memory ops collapse into one rolling run instead of a
+        # per-call blink row (surface ②; see consumers/tui/memory_ops.py).
+        if parent_id is None:
+            if self._mem_run.absorb(name, args):
+                return
+            # Flush before registering this non-memory tool so the collapsed
+            # memory row reaches ChatLog before this tool's live row — preserving
+            # the order in which ops were received (CC's flushGroup).
+            self._flush_mem_run()
+
         mini = get_tool(name)
         args_repr = mini.render_received(args) if mini else ""
         if parent_id is None:
@@ -282,9 +297,17 @@ class ToolStatus(Static):
             )
         self.post_message(ToolFlushed(markup))
 
+    def _flush_mem_run(self) -> None:
+        """Close the open memory run (if any) and persist one collapsed row."""
+        summary = self._mem_run.flush()
+        if summary:
+            self.post_message(
+                ToolFlushed(f"[green]●[/green] [cyan]{summary}[/cyan]")
+            )
+
     def _tick(self) -> None:
         self._frame = (self._frame + 1) % len(_BLINK)
-        if not self._tools:
+        if not self._tools and not self._mem_run.is_open:
             return
         b = _BLINK[self._frame]
         lines = []
@@ -306,6 +329,11 @@ class ToolStatus(Static):
                     f"[cyan]{g['current_label']}[/cyan]"
                     f" · {g['tool_count']} · {elapsed}s"
                 )
+        summary = self._mem_run.live_summary()
+        if summary:
+            # Memory ops are absorbed only when parent_id is None (always
+            # top-level), so there is no prefix to apply here.
+            lines.append(f"[grey50]{b}[/grey50] [cyan]{summary}[/cyan]")
         self.update("\n".join(lines))
 
 

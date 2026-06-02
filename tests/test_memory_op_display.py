@@ -163,3 +163,59 @@ def test_classify_none_for_unknown_tool(memdir):
     from mini_cc.consumers.tui.memory_ops import classify_memory_op
     # Unknown tool names short-circuit to None before any path handling.
     assert classify_memory_op("plan_todos", {"path": str(memdir / "m.md")}) is None
+
+
+# ---- ToolStatus wiring (T12 end-to-end, T15 sub-tool) ----
+
+def _make_tool_status():
+    """Instantiate ToolStatus unmounted; stub post_message to capture flushes.
+    The exercised paths (add_tool / _flush_mem_run) only touch post_message —
+    no Textual screen needed."""
+    from mini_cc.consumers.tui.app import ToolStatus
+    ts = ToolStatus()
+    captured = []
+    ts.post_message = lambda m: captured.append(m)
+    return ts, captured
+
+
+def test_toolstatus_flushes_one_memory_row_when_broken(memdir):
+    from mini_cc.consumers.tui.app import ToolFlushed
+    ts, captured = _make_tool_status()
+    p = str(memdir / "m.md")
+    ts.add_tool("c0", "file_read", {"path": p}, "", "a0", None)
+    ts.add_tool("c1", "file_read", {"path": p}, "", "a1", None)
+    assert ts._mem_run.is_open is True
+    assert captured == []  # nothing flushed mid-run
+    # A non-memory top-level tool breaks the run → exactly one collapsed row.
+    ts.add_tool("c2", "execute_command", {"command": "ls"}, "", "a2", None)
+    flushed = [m for m in captured if isinstance(m, ToolFlushed)]
+    assert len(flushed) == 1
+    assert "Recalled 2 memories" in flushed[0].markup
+    assert ts._mem_run.is_open is False
+
+
+def test_toolstatus_subtool_memory_read_not_folded(memdir):
+    ts, captured = _make_tool_status()
+    # parent_id set → sub-tool path; must NOT open a memory run.
+    ts.add_tool("s1", "file_read", {"path": str(memdir / "m.md")},
+                "  ", "a1", "missing-parent")
+    assert ts._mem_run.is_open is False
+    assert captured == []
+
+
+def test_toolstatus_flushes_memory_row_on_turn_end(memdir):
+    from mini_cc.consumers.tui.app import ToolFlushed
+    ts, captured = _make_tool_status()
+    # end_turn() calls update()/remove_class() that assume a mounted widget;
+    # stub them so we can exercise the flush path in isolation.
+    ts.update = lambda *a, **k: None
+    ts.remove_class = lambda *a, **k: None
+    p = str(memdir / "m.md")
+    ts.add_tool("c0", "file_read", {"path": p}, "", "a0", None)
+    ts.add_tool("c1", "file_read", {"path": p}, "", "a1", None)
+    assert ts._mem_run.is_open is True
+    ts.end_turn()
+    flushed = [m for m in captured if isinstance(m, ToolFlushed)]
+    assert len(flushed) == 1
+    assert "Recalled 2 memories" in flushed[0].markup
+    assert ts._mem_run.is_open is False
