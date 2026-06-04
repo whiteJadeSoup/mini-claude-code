@@ -219,3 +219,24 @@ def test_toolstatus_flushes_memory_row_on_turn_end(memdir):
     assert len(flushed) == 1
     assert "Recalled 2 memories" in flushed[0].markup
     assert ts._mem_run.is_open is False
+
+
+def test_toolstatus_two_runs_separated_by_non_memory_tool(memdir):
+    from mini_cc.consumers.tui.app import ToolFlushed
+    ts, captured = _make_tool_status()
+    ts.update = lambda *a, **k: None
+    ts.remove_class = lambda *a, **k: None
+    p = str(memdir / "m.md")
+    ts.add_tool("c0", "file_read", {"path": p}, "", "a0", None)
+    ts.add_tool("c1", "file_read", {"path": p}, "", "a1", None)
+    ts.add_tool("c2", "execute_command", {"command": "ls"}, "", "a2", None)  # break → flush #1
+    assert ts._mem_run.is_open is False
+    ts.add_tool("c3", "file_read", {"path": p}, "", "a3", None)              # new run
+    assert ts._mem_run.is_open is True
+    ts.end_turn()                                                            # flush #2
+    mem_rows = [m.markup for m in captured
+                if isinstance(m, ToolFlushed) and "memor" in m.markup]
+    assert mem_rows == [
+        "[green]●[/green] [cyan]Recalled 2 memories[/cyan]",
+        "[green]●[/green] [cyan]Recalled 1 memory[/cyan]",
+    ]

@@ -208,6 +208,9 @@ class ToolStatus(Static):
         self.add_class("active")
 
     def end_turn(self) -> None:
+        # Safe to call twice (interrupt calls this directly, then the turn_end
+        # event calls it again): the fresh MemoryRun() reset below makes the
+        # second flush() a no-op.
         self._flush_mem_run()
         self._tools.clear()
         self._tool_order.clear()
@@ -298,7 +301,11 @@ class ToolStatus(Static):
         self.post_message(ToolFlushed(markup))
 
     def _flush_mem_run(self) -> None:
-        """Close the open memory run (if any) and persist one collapsed row."""
+        """Close the open memory run (if any) and persist one collapsed row.
+
+        The dot is always green: a run collapses operations, not outcomes, so a
+        failed memory op is still counted (spec T16) rather than surfaced as its
+        own red row."""
         summary = self._mem_run.flush()
         if summary:
             self.post_message(
@@ -333,7 +340,7 @@ class ToolStatus(Static):
         if summary:
             # Memory ops are absorbed only when parent_id is None (always
             # top-level), so there is no prefix to apply here.
-            lines.append(f"[grey50]{b}[/grey50] [cyan]{summary}[/cyan]")
+            lines.append(f"[grey50]{b}[/grey50] [cyan]{summary}…[/cyan]")
         self.update("\n".join(lines))
 
 

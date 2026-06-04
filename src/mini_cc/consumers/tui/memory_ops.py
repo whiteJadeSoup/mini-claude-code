@@ -47,6 +47,10 @@ def memory_run_summary(read: int, write: int, search: int, *, active: bool) -> s
     the first part's verb is capitalized, the rest lowercased (CC parity). Read
     and write carry a count (singular/plural); search does not. Returns "" when
     all counts are zero.
+
+    Parameter order (read, write, search) follows MemoryRun._counts and the
+    call sites; it intentionally differs from the render order (read · search ·
+    write). Pass the counts by the names above, not by guessing from the output.
     """
     parts: list[str] = []
 
